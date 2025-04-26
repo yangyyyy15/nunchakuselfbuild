@@ -45,7 +45,7 @@ class NunchakuT5EncoderModel(T5EncoderModel):
             )
             .to(kwargs.get("torch_dtype", torch.bfloat16))
         )
-        
+
         subfolder = kwargs.get("subfolder", None)
         if os.path.exists(pretrained_model_name_or_path):
             dirname = (
@@ -81,7 +81,7 @@ class NunchakuT5EncoderModel(T5EncoderModel):
         # Skip wo quantization for performance
         qlayer_suffix = tuple(kwargs.get("qlayer_suffix", (".q", ".k", ".v", ".o", ".wi_0", ".wi_1")))
         state_dict = load_file(qmodel_path)
-        
+
         named_modules = {}
         for name, module in t5_encoder.named_modules():
             assert isinstance(name, str)
@@ -102,5 +102,5 @@ class NunchakuT5EncoderModel(T5EncoderModel):
             device = torch.device(device)
         t5_encoder.to_empty(device=device)
         t5_encoder.load_state_dict(state_dict, strict=False)
-        
+
         return t5_encoder
