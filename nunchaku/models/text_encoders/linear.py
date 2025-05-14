@@ -82,7 +82,7 @@ class W4Linear(nn.Module):
             )
         else:
             if self.group_size != 128:
-                raise NotImplementedError(f"Kernel currently only supports group_size=128.")
+                raise NotImplementedError("Kernel currently only supports group_size=128.")
             out = gemm_awq(x, self.qweight, self.scales, self.scaled_zeros)
         out = out + self.bias if self.bias is not None else out
         return out
