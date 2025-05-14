@@ -78,15 +78,13 @@ class NunchakuT5EncoderModel(T5EncoderModel):
                 local_dir_use_symlinks=kwargs.get("local_dir_use_symlinks", "auto"),
             )
 
-        # Skip wo quantization for performance
-        qlayer_suffix = tuple(kwargs.get("qlayer_suffix", (".q", ".k", ".v", ".o", ".wi_0", ".wi_1")))
         state_dict = load_file(qmodel_path)
 
         named_modules = {}
         for name, module in t5_encoder.named_modules():
             assert isinstance(name, str)
             if isinstance(module, nn.Linear):
-                if f"{name}.qweight" in state_dict and name.endswith(qlayer_suffix):
+                if f"{name}.qweight" in state_dict:
                     print(f"Switching {name} to W4Linear")
                     qmodule = W4Linear.from_linear(module, group_size=128, init_only=True)
                     # modeling_t5.py: T5DenseGatedActDense needs dtype of weight

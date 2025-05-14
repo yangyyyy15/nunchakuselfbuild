@@ -8,8 +8,8 @@ from .utils import run_test
 @pytest.mark.parametrize(
     "height,width,use_qencoder,expected_lpips",
     [
-        (1024, 1024, True, 0.141),
-        (1920, 1024, True, 0.155)
+        (1024, 1024, True, 0.1356),
+        (1920, 1024, True, 0.1445)
     ],
 )
 def test_int4_schnell_qencoder(height: int, width: int, use_qencoder: bool, expected_lpips: float):
