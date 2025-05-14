@@ -2,8 +2,9 @@ import torch
 from diffusers import FluxPipeline
 
 from nunchaku import NunchakuFluxTransformer2dModel
-from nunchaku.utils import get_precision
 from nunchaku.models.text_encoders.t5_encoder import NunchakuT5EncoderModel
+from nunchaku.utils import get_precision
+
 
 def main():
     pipeline_init_kwargs = {}
@@ -18,6 +19,7 @@ def main():
         "A cat holding a sign that says hello world", width=1024, height=1024, num_inference_steps=4, guidance_scale=0
     ).images[0]
     image.save(f"flux.1-schnell-qencoder-{precision}.png")
+
 
 if __name__ == "__main__":
     main()

@@ -8,6 +8,7 @@ from transformers import PretrainedConfig, T5EncoderModel
 
 from .linear import W4Linear
 
+
 class NunchakuT5EncoderModel(T5EncoderModel):
     @classmethod
     def from_pretrained(
