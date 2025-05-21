@@ -68,6 +68,7 @@ if __name__ == "__main__":
     if "dev" in version:
         version = version + {date.today().strftime("%Y%m%d")}  # data
     version = version + "+torch" + torch_major_minor_version
+    print(version)
 
     ROOT_DIR = os.path.dirname(__file__)
 
