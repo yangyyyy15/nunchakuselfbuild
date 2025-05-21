@@ -65,8 +65,8 @@ if __name__ == "__main__":
 
     torch_version = torch.__version__.split("+")[0]
     torch_major_minor_version = ".".join(torch_version.split(".")[:2])
-    if "dev" in version:
-        version = version + {date.today().strftime("%Y%m%d")}  # data
+    # if "dev" in version:
+    #     version = version + {date.today().strftime("%Y%m%d")}  # data
     version = version + "+torch" + torch_major_minor_version
     print(version)
 
