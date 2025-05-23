@@ -62,6 +62,8 @@ class NunchakuT5EncoderModel(T5EncoderModel):
         # Initialize model on 'meta' device (no memory allocation for weights)
         with init_empty_weights():
             t5_encoder = T5EncoderModel(config).to(kwargs.get("torch_dtype", torch.bfloat16))
+
+        t5_encoder.eval()
         # Load the model weights from the safetensors file
         state_dict = load_file(qmodel_path)
 
