@@ -51,10 +51,22 @@ jobs:
       - name: Setup Visual Studio environment
         uses: microsoft/setup-msbuild@v2
 
+      - name: Set CUDA full version
+        shell: bash
+        run: |
+          # Map short CUDA versions to full versions supported by Jimver/cuda-toolkit
+          if [ "${{ github.event.inputs.cuda_version }}" == "12.4" ]; then
+            echo "CUDA_FULL_VERSION=12.4.1" >> $GITHUB_ENV
+          elif [ "${{ github.event.inputs.cuda_version }}" == "12.8" ]; then
+            echo "CUDA_FULL_VERSION=12.8.0" >> $GITHUB_ENV
+          else
+            echo "CUDA_FULL_VERSION=${{ github.event.inputs.cuda_version }}" >> $GITHUB_ENV
+          fi
+
       - name: Install CUDA Toolkit
         uses: Jimver/cuda-toolkit@v0.2.16
         with:
-          cuda: ${{ github.event.inputs.cuda_version || '12.8' }}
+          cuda: ${{ env.CUDA_FULL_VERSION }}
           method: 'network'
           sub-packages: '["nvcc", "cudart", "curand", "cublas", "cusparse", "cusolver"]'
 
