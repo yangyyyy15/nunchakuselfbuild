@@ -1,0 +1,142 @@
+name: Windows Build Fork
+
+on:
+  workflow_dispatch:
+    inputs:
+      python_version:
+        description: 'Python version'
+        required: true
+        default: '3.10'
+        type: choice
+        options:
+          - '3.10'
+          - '3.11'
+          - '3.12'
+      torch_version:
+        description: 'PyTorch version'
+        required: true
+        default: '2.7'
+        type: choice
+        options:
+          - '2.5'
+          - '2.6'
+          - '2.7'
+      cuda_version:
+        description: 'CUDA version'
+        required: true
+        default: '12.8'
+        type: choice
+        options:
+          - '12.4'
+          - '12.8'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-wheel:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ github.event.inputs.python_version || '3.10' }}
+
+      - name: Setup Visual Studio environment
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.16
+        with:
+          cuda: ${{ github.event.inputs.cuda_version || '12.8' }}
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "curand", "cublas", "cusparse", "cusolver"]'
+
+      - name: Verify CUDA installation
+        run: |
+          nvcc --version
+          echo "CUDA_PATH=%CUDA_PATH%" >> %GITHUB_ENV%
+          echo "CUDA_HOME=%CUDA_PATH%" >> %GITHUB_ENV%
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ninja setuptools wheel build
+
+      - name: Set versions
+        shell: cmd
+        run: |
+          set PYTHON_VERSION=${{ github.event.inputs.python_version || '3.10' }}
+          set TORCH_VERSION=${{ github.event.inputs.torch_version || '2.7' }}
+          set CUDA_VERSION=${{ github.event.inputs.cuda_version || '12.8' }}
+          set CUDA_SHORT_VERSION=%CUDA_VERSION:.=%
+
+          if "%TORCH_VERSION%"=="2.5" (
+              set TORCHVISION_VERSION=0.20
+              set TORCHAUDIO_VERSION=2.5
+          ) else if "%TORCH_VERSION%"=="2.6" (
+              set TORCHVISION_VERSION=0.21
+              set TORCHAUDIO_VERSION=2.6
+          ) else if "%TORCH_VERSION%"=="2.7" (
+              set TORCHVISION_VERSION=0.22
+              set TORCHAUDIO_VERSION=2.7
+          )
+
+          echo PYTHON_VERSION=%PYTHON_VERSION%>> %GITHUB_ENV%
+          echo TORCH_VERSION=%TORCH_VERSION%>> %GITHUB_ENV%
+          echo CUDA_VERSION=%CUDA_VERSION%>> %GITHUB_ENV%
+          echo CUDA_SHORT_VERSION=%CUDA_SHORT_VERSION%>> %GITHUB_ENV%
+          echo TORCHVISION_VERSION=%TORCHVISION_VERSION%>> %GITHUB_ENV%
+          echo TORCHAUDIO_VERSION=%TORCHAUDIO_VERSION%>> %GITHUB_ENV%
+
+      - name: Install PyTorch
+        run: |
+          pip install --no-cache-dir torch==${{ env.TORCH_VERSION }} torchvision==${{ env.TORCHVISION_VERSION }} torchaudio==${{ env.TORCHAUDIO_VERSION }} --index-url https://download.pytorch.org/whl/cu${{ env.CUDA_SHORT_VERSION }}/
+
+      - name: Build wheel
+        shell: cmd
+        run: |
+          set NUNCHAKU_INSTALL_MODE=ALL
+          set NUNCHAKU_BUILD_WHEELS=1
+          set DISTUTILS_USE_SDK=1
+          set MAX_JOBS=4
+          set CUDA_HOME=%CUDA_PATH%
+          set CUDA_ROOT=%CUDA_PATH%
+
+          if exist build rd /s /q build
+          python -m build --wheel --no-isolation
+
+      - name: Upload wheels as artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-wheels-py${{ env.PYTHON_VERSION }}-torch${{ env.TORCH_VERSION }}-cuda${{ env.CUDA_VERSION }}
+          path: dist/*.whl
+
+      - name: Create Release
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.whl
+          name: Nunchaku Windows Build - Python ${{ env.PYTHON_VERSION }} PyTorch ${{ env.TORCH_VERSION }} CUDA ${{ env.CUDA_VERSION }}
+          tag_name: windows-build-${{ github.run_number }}-py${{ env.PYTHON_VERSION }}-torch${{ env.TORCH_VERSION }}-cuda${{ env.CUDA_VERSION }}
+          prerelease: true
+          body: |
+            Nunchaku Windows wheel build for ComfyUI compatibility
+
+            **Build Info:**
+            - Python: ${{ env.PYTHON_VERSION }}
+            - PyTorch: ${{ env.TORCH_VERSION }}
+            - CUDA: ${{ env.CUDA_VERSION }}
+
+            **Usage:**
+            ```bash
+            pip install [wheel_file_name].whl
+            ```
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
