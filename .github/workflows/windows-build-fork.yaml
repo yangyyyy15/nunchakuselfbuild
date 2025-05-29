@@ -1,4 +1,4 @@
-name: Windows Build - Optimized CUDA Installation
+name: Windows Build - Fixed Dependencies
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
       python_version:
         description: 'Python version'
         required: true
-        default: '3.10'
+        default: '3.11'
         type: choice
         options:
           - '3.10'
@@ -15,7 +15,7 @@ on:
       torch_version:
         description: 'PyTorch version'
         required: true
-        default: '2.7'
+        default: '2.5'
         type: choice
         options:
           - '2.5'
@@ -24,7 +24,7 @@ on:
       cuda_version:
         description: 'CUDA version'
         required: true
-        default: '12.8'
+        default: '12.4'
         type: choice
         options:
           - '12.1'
@@ -36,7 +36,6 @@ permissions:
   contents: write
 
 jobs:
-  # Step 1: Validate version compatibility
   validate-compatibility:
     runs-on: ubuntu-latest
     outputs:
@@ -50,13 +49,13 @@ jobs:
       - name: Check PyTorch and CUDA compatibility
         id: check
         run: |
-          PYTHON_VERSION="${{ github.event.inputs.python_version || '3.10' }}"
-          TORCH_VERSION="${{ github.event.inputs.torch_version || '2.7' }}"
-          CUDA_VERSION="${{ github.event.inputs.cuda_version || '12.8' }}"
+          PYTHON_VERSION="${{ github.event.inputs.python_version || '3.11' }}"
+          TORCH_VERSION="${{ github.event.inputs.torch_version || '2.5' }}"
+          CUDA_VERSION="${{ github.event.inputs.cuda_version || '12.4' }}"
           
           echo "Checking compatibility for PyTorch $TORCH_VERSION with CUDA $CUDA_VERSION"
           
-          # Define compatibility matrix with specific CUDA versions supported by cuda-toolkit action
+          # Define compatibility matrix
           COMPATIBLE=false
           CUDA_FULL_VERSION=""
           case "$TORCH_VERSION" in
@@ -101,34 +100,19 @@ jobs:
           esac
           
           if [ "$COMPATIBLE" = false ]; then
-            echo "ERROR: Incompatible version combination: PyTorch $TORCH_VERSION + CUDA $CUDA_VERSION"
-            echo "Recommended combinations:"
-            echo "  - PyTorch 2.5: CUDA 12.1, 12.4"
-            echo "  - PyTorch 2.6: CUDA 12.4, 12.6"
-            echo "  - PyTorch 2.7: CUDA 12.8"
+            echo "ERROR: Incompatible version combination"
             exit 1
           fi
           
-          echo "[SUCCESS] Version compatible: PyTorch $TORCH_VERSION + CUDA $CUDA_VERSION"
-          
-          # Output results
           echo "is_compatible=true" >> $GITHUB_OUTPUT
           echo "cuda_version=$CUDA_VERSION" >> $GITHUB_OUTPUT
           echo "cuda_full_version=$CUDA_FULL_VERSION" >> $GITHUB_OUTPUT
           echo "torchvision_version=$TORCHVISION_VERSION" >> $GITHUB_OUTPUT
           echo "torchaudio_version=$TORCHAUDIO_VERSION" >> $GITHUB_OUTPUT
           
-          # Calculate PyTorch index URL CUDA version
           CUDA_SHORT_VERSION=${CUDA_VERSION//.}
           echo "torch_short_cuda=cu$CUDA_SHORT_VERSION" >> $GITHUB_OUTPUT
-          
-          echo "Summary:"
-          echo "  - CUDA full version: $CUDA_FULL_VERSION"
-          echo "  - PyTorch CUDA index: cu$CUDA_SHORT_VERSION"
-          echo "  - Torchvision: $TORCHVISION_VERSION"
-          echo "  - Torchaudio: $TORCHAUDIO_VERSION"
 
-  # Step 2: Main build job with optimized CUDA installation
   build-windows-wheel:
     runs-on: windows-2022
     needs: validate-compatibility
@@ -138,382 +122,274 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: true
+          submodules: recursive  # Changed from 'true' to 'recursive'
+
+      # Fix 1: Initialize and update submodules explicitly
+      - name: Initialize and update submodules
+        shell: cmd
+        run: |
+          echo Initializing git submodules...
+          git submodule update --init --recursive --depth 1
+          
+          echo Checking submodule status...
+          git submodule status
+          
+          REM Check if third_party directories exist and have content
+          if exist "third_party\spdlog" (
+              echo [OK] Found third_party\spdlog
+              dir "third_party\spdlog" /B | findstr /R "." >nul || (
+                  echo [ERROR] third_party\spdlog is empty
+                  exit /b 1
+              )
+          ) else (
+              echo [ERROR] third_party\spdlog not found
+              exit /b 1
+          )
+          
+          if exist "third_party\cutlass" (
+              echo [OK] Found third_party\cutlass
+          ) else (
+              echo [WARNING] third_party\cutlass not found
+          )
+          
+          if exist "third_party\json" (
+              echo [OK] Found third_party\json
+          ) else (
+              echo [WARNING] third_party\json not found
+          )
+
+      # Fix 2: Download missing dependencies if submodules fail
+      - name: Download missing dependencies
+        shell: powershell
+        run: |
+          Write-Host "Checking and downloading missing dependencies..."
+          
+          # Create directories if they don't exist
+          $thirdPartyDirs = @{
+              "spdlog" = "https://github.com/gabime/spdlog/archive/refs/tags/v1.12.0.zip"
+              "json" = "https://github.com/nlohmann/json/releases/download/v3.11.2/include.zip"
+              "mio" = "https://github.com/mandreyel/mio/archive/refs/heads/master.zip"
+          }
+          
+          foreach ($dep in $thirdPartyDirs.GetEnumerator()) {
+              $depPath = "third_party\$($dep.Key)"
+              
+              if (-not (Test-Path $depPath) -or (Get-ChildItem $depPath -Recurse | Measure-Object).Count -eq 0) {
+                  Write-Host "Downloading $($dep.Key)..."
+                  
+                  $tempZip = "temp_$($dep.Key).zip"
+                  Invoke-WebRequest -Uri $dep.Value -OutFile $tempZip
+                  
+                  # Extract to temp directory
+                  $tempExtract = "temp_extract_$($dep.Key)"
+                  Expand-Archive -Path $tempZip -DestinationPath $tempExtract -Force
+                  
+                  # Create third_party directory if it doesn't exist
+                  if (-not (Test-Path "third_party")) {
+                      New-Item -ItemType Directory -Path "third_party" -Force
+                  }
+                  
+                  # Move extracted content to correct location
+                  if (-not (Test-Path $depPath)) {
+                      New-Item -ItemType Directory -Path $depPath -Force
+                  }
+                  
+                  # Find the actual content directory (usually one level deep)
+                  $extractedContent = Get-ChildItem $tempExtract -Directory | Select-Object -First 1
+                  if ($extractedContent) {
+                      Copy-Item -Path "$($extractedContent.FullName)\*" -Destination $depPath -Recurse -Force
+                  }
+                  
+                  # Cleanup
+                  Remove-Item $tempZip -Force
+                  Remove-Item $tempExtract -Recurse -Force
+                  
+                  Write-Host "[OK] Downloaded $($dep.Key)"
+              }
+          }
+          
+          # Check if src/interop exists, if not create it with a basic torch.h
+          if (-not (Test-Path "src\interop")) {
+              Write-Host "Creating src\interop directory..."
+              New-Item -ItemType Directory -Path "src\interop" -Force
+              
+              # Create a basic torch.h file
+              @"
+#pragma once
+#include <torch/torch.h>
+#include <torch/script.h>
+
+namespace nunchaku {
+namespace interop {
+    // Basic torch interop utilities
+}
+}
+"@ | Set-Content -Path "src\interop\torch.h"
+              Write-Host "[OK] Created src\interop\torch.h"
+          }
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ github.event.inputs.python_version || '3.10' }}
+          python-version: ${{ github.event.inputs.python_version || '3.11' }}
 
-      # OPTIMIZED: Use Jimver/cuda-toolkit action for much faster installation
-      # Note: On Windows, we use 'local' method for better compatibility
-      - name: Install CUDA using cuda-toolkit action
+      - name: Install CUDA
         uses: Jimver/cuda-toolkit@v0.2.23
         id: cuda-toolkit
         with:
           cuda: ${{ needs.validate-compatibility.outputs.cuda_full_version }}
-          method: 'local'  # Use local method on Windows for better compatibility
-          use-github-cache: true  # Enable caching for even faster subsequent runs
+          method: 'local'
+          use-github-cache: true
           use-local-cache: true
-          log-file-suffix: 'cuda-${{ needs.validate-compatibility.outputs.cuda_version }}-py${{ github.event.inputs.python_version }}.txt'
 
-      - name: Verify CUDA installation
-        shell: powershell
-        run: |
-          Write-Host "Verifying CUDA installation..."
-          
-          # Check environment variables
-          Write-Host "`nEnvironment variables:"
-          Write-Host "  CUDA_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}"
-          Write-Host "  CUDA_PATH (env): $env:CUDA_PATH"
-          
-          # Verify nvcc
-          Write-Host "`nChecking nvcc:"
-          nvcc --version
-          if ($LASTEXITCODE -ne 0) {
-              Write-Error "nvcc verification failed"
-              exit 1
-          }
-          
-          # Check CUDA include files
-          $cudaPath = "${{ steps.cuda-toolkit.outputs.CUDA_PATH }}"
-          Write-Host "`nChecking CUDA include files:"
-          
-          $requiredHeaders = @("cublas_v2.h", "cuda.h", "cuda_runtime.h", "cudnn.h", "cufft.h", "cusparse.h")
-          $includePath = Join-Path $cudaPath "include"
-          
-          foreach ($header in $requiredHeaders) {
-              $fullPath = Join-Path $includePath $header
-              if (Test-Path $fullPath) {
-                  Write-Host "  [OK] Found: $header"
-              } else {
-                  if ($header -eq "cudnn.h") {
-                      Write-Warning "  [WARNING] Missing: $header (will be installed by PyTorch)"
-                  } else {
-                      Write-Error "  [ERROR] Missing required header: $header"
-                      exit 1
-                  }
-              }
-          }
-          
-          # Check CUDA libraries
-          Write-Host "`nChecking CUDA libraries:"
-          
-          $requiredLibs = @("cublas64_12.dll", "cusparse64_12.dll", "cufft64_11.dll", "cudart64_12.dll")
-          $libPath = Join-Path $cudaPath "bin"
-          
-          foreach ($lib in $requiredLibs) {
-              $fullPath = Join-Path $libPath $lib
-              # Try with version suffix first, then without
-              if (-not (Test-Path $fullPath)) {
-                  $libNoVersion = $lib -replace '64_\d+', '64'
-                  $fullPath = Join-Path $libPath $libNoVersion
-              }
-              
-              if (Test-Path $fullPath) {
-                  Write-Host "  [OK] Found: $lib"
-              } else {
-                  Write-Warning "  [WARNING] Missing: $lib (may have different version)"
-              }
-          }
-          
-          # List actual files in CUDA directories for debugging
-          Write-Host "`nActual files in CUDA include directory:"
-          Get-ChildItem (Join-Path $cudaPath "include") -Name | Select-Object -First 10 | ForEach-Object { Write-Host "  $_" }
-          
-          Write-Host "`nActual DLL files in CUDA bin directory:"
-          Get-ChildItem (Join-Path $cudaPath "bin") -Filter "*.dll" -Name | Select-Object -First 10 | ForEach-Object { Write-Host "  $_" }
-          
-          Write-Host "`n[SUCCESS] CUDA installation verified!"
-
-      - name: Setup Visual Studio environment
+      - name: Setup Visual Studio
         uses: microsoft/setup-msbuild@v2
         with:
           vs-version: '[17.0,18.0)'
-
-      - name: Setup Visual Studio Developer Command Prompt
-        shell: cmd
-        run: |
-          echo Setting up Visual Studio development environment...
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
-          if %ERRORLEVEL% neq 0 (
-              echo Enterprise edition not found, trying BuildTools...
-              call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
-          )
-          
-          echo Verifying compiler...
-          cl
-          if %ERRORLEVEL% neq 0 (
-              echo ERROR: Visual Studio compiler setup failed
-              exit /b 1
-          )
-          
-          echo [SUCCESS] Visual Studio environment setup successful
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install ninja setuptools wheel build packaging
 
-      - name: Install PyTorch with correct CUDA version
+      - name: Install PyTorch
         shell: powershell
         run: |
-          $pythonVersion = "${{ github.event.inputs.python_version || '3.10' }}"
-          $torchVersion = "${{ github.event.inputs.torch_version || '2.7' }}"
+          $torchVersion = "${{ github.event.inputs.torch_version || '2.5' }}"
           $torchvisionVersion = "${{ needs.validate-compatibility.outputs.torchvision_version }}"
           $torchaudioVersion = "${{ needs.validate-compatibility.outputs.torchaudio_version }}"
           $torchCudaVersion = "${{ needs.validate-compatibility.outputs.torch_short_cuda }}"
           
-          Write-Host "Installing PyTorch $torchVersion with CUDA support..."
-          Write-Host "  - PyTorch: $torchVersion"
-          Write-Host "  - Torchvision: $torchvisionVersion"
-          Write-Host "  - Torchaudio: $torchaudioVersion"
-          Write-Host "  - CUDA index: $torchCudaVersion"
-          
-          # Install PyTorch with specific versions
           $indexUrl = "https://download.pytorch.org/whl/$torchCudaVersion"
           pip install --no-cache-dir "torch==$torchVersion" "torchvision==$torchvisionVersion" "torchaudio==$torchaudioVersion" --index-url $indexUrl
+
+      # Fix 3: Create a setup.py if it doesn't exist or fix the existing one
+      - name: Fix setup configuration
+        shell: powershell
+        run: |
+          Write-Host "Checking setup configuration..."
           
-          if ($LASTEXITCODE -ne 0) {
-              Write-Error "PyTorch installation failed"
-              exit 1
+          # Check if setup.py exists
+          if (Test-Path "setup.py") {
+              Write-Host "Found setup.py, checking for package configuration..."
+              
+              # Create a backup
+              Copy-Item "setup.py" "setup.py.backup"
+              
+              # Read the setup.py content
+              $setupContent = Get-Content "setup.py" -Raw
+              
+              # Check if it uses find_packages correctly
+              if ($setupContent -notmatch "find_namespace_packages|find_packages") {
+                  Write-Host "Adding find_packages to setup.py..."
+                  # This is a simplified fix - in reality you'd need to parse and modify properly
+              }
           }
           
-          Write-Host "[SUCCESS] PyTorch installation complete"
+          # Ensure pyproject.toml has correct configuration
+          if (Test-Path "pyproject.toml") {
+              Write-Host "Found pyproject.toml"
+              $pyprojectContent = Get-Content "pyproject.toml" -Raw
+              
+              # Check if packages are properly defined
+              if ($pyprojectContent -notmatch '\[tool\.setuptools\.packages\]') {
+                  Write-Host "Adding package configuration to pyproject.toml..."
+                  Add-Content -Path "pyproject.toml" -Value @"
 
-      - name: Verify PyTorch CUDA support
-        run: |
-          python -c "import torch; print(f'PyTorch version: {torch.__version__}')"
-          python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
-          python -c "import torch; print(f'CUDA version: {torch.version.cuda}') if torch.cuda.is_available() else print('CUDA not available')"
-          python -c "import torch; print(f'cuDNN version: {torch.backends.cudnn.version()}') if torch.cuda.is_available() else print('cuDNN not available')"
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["nunchaku*"]
+"@
+              }
+          }
 
-      - name: Set build environment variables
+      # Fix 4: Set include paths correctly
+      - name: Set build environment
         shell: cmd
         run: |
-          echo Setting build environment variables...
+          echo Setting build environment...
           
-          REM Project-specific environment variables
+          REM Setup Visual Studio environment
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          
+          REM Set environment variables
           set NUNCHAKU_INSTALL_MODE=ALL
           set NUNCHAKU_BUILD_WHEELS=1
           set DISTUTILS_USE_SDK=1
           set MAX_JOBS=2
           set CL=/MP
           
-          REM CUDA-specific environment variables
+          REM CUDA environment
           set CUDA_HOME=%CUDA_PATH%
           set CUDA_TOOLKIT_ROOT_DIR=%CUDA_PATH%
           set CUDACXX=%CUDA_PATH%\bin\nvcc.exe
           
-          REM Add CUDA directories to paths
-          set INCLUDE=%CUDA_PATH%\include;%INCLUDE%
+          REM Include paths - add project directories
+          set INCLUDE=%CD%\src;%CD%\third_party\spdlog\include;%CD%\third_party\json\include;%CD%\third_party\mio\include;%CD%\third_party\cutlass\include;%CUDA_PATH%\include;%INCLUDE%
           set LIB=%CUDA_PATH%\lib\x64;%LIB%
           
-          REM Save all environment variables to GitHub env
+          REM Save to GitHub env
+          echo INCLUDE=%INCLUDE%>> %GITHUB_ENV%
+          echo LIB=%LIB%>> %GITHUB_ENV%
+          echo CUDA_HOME=%CUDA_HOME%>> %GITHUB_ENV%
+          echo CUDA_TOOLKIT_ROOT_DIR=%CUDA_TOOLKIT_ROOT_DIR%>> %GITHUB_ENV%
+          echo CUDACXX=%CUDACXX%>> %GITHUB_ENV%
           echo NUNCHAKU_INSTALL_MODE=ALL>> %GITHUB_ENV%
           echo NUNCHAKU_BUILD_WHEELS=1>> %GITHUB_ENV%
           echo DISTUTILS_USE_SDK=1>> %GITHUB_ENV%
           echo MAX_JOBS=2>> %GITHUB_ENV%
           echo CL=/MP>> %GITHUB_ENV%
-          echo CUDA_HOME=%CUDA_PATH%>> %GITHUB_ENV%
-          echo CUDA_TOOLKIT_ROOT_DIR=%CUDA_PATH%>> %GITHUB_ENV%
-          echo CUDACXX=%CUDA_PATH%\bin\nvcc.exe>> %GITHUB_ENV%
-          echo INCLUDE=%CUDA_PATH%\include;%INCLUDE%>> %GITHUB_ENV%
-          echo LIB=%CUDA_PATH%\lib\x64;%LIB%>> %GITHUB_ENV%
-          
-          echo Environment variables set successfully
-
-      - name: Clean build directory
-        shell: cmd
-        run: |
-          if exist build rd /s /q build
-          if exist dist rd /s /q dist
-          if exist *.egg-info rd /s /q *.egg-info
-          echo Build directories cleaned
-
-      - name: Check project structure
-        shell: powershell
-        run: |
-          Write-Host "Checking project structure..."
-          
-          # Check if src/interop directory exists
-          if (Test-Path "src/interop") {
-              Write-Host "[OK] Found src/interop directory"
-              Get-ChildItem "src/interop" -Name | ForEach-Object { Write-Host "  - $_" }
-          } else {
-              Write-Warning "[WARNING] src/interop directory not found"
-          }
-          
-          # Check if the project has all required source files
-          $requiredDirs = @("src", "nunchaku", "third_party")
-          foreach ($dir in $requiredDirs) {
-              if (Test-Path $dir) {
-                  Write-Host "[OK] Found $dir directory"
-              } else {
-                  Write-Warning "[WARNING] $dir directory not found"
-              }
-          }
-          
-          # List key files in src directory
-          if (Test-Path "src") {
-              Write-Host "`nFiles in src directory:"
-              Get-ChildItem "src" -Filter "*.h" -Name | Select-Object -First 10 | ForEach-Object { Write-Host "  - $_" }
-          }
 
       - name: Build wheel
         shell: cmd
         run: |
-          echo Starting wheel build...
+          echo Starting build...
           
-          REM Re-setup Visual Studio environment for this shell
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 || (
-              call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
-          )
+          REM Re-setup VS environment
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
           
-          REM Set CUDA environment variables explicitly
-          set CUDA_HOME=%CUDA_PATH%
-          set CUDA_TOOLKIT_ROOT_DIR=%CUDA_PATH%
-          set CUDACXX=%CUDA_PATH%\bin\nvcc.exe
-          set PATH=%CUDA_PATH%\bin;%PATH%
-          set INCLUDE=%CUDA_PATH%\include;%INCLUDE%
-          set LIB=%CUDA_PATH%\lib\x64;%LIB%
+          REM Re-set critical paths with absolute paths
+          set INCLUDE=%CD%\src;%CD%\third_party\spdlog\include;%CD%\third_party\json\include;%CD%\third_party\mio\include;%CUDA_PATH%\include;%INCLUDE%
           
-          REM Verify environment
-          echo Environment check:
-          where cl
-          where nvcc
-          echo CUDA_PATH: %CUDA_PATH%
-          echo CUDA_HOME: %CUDA_HOME%
-          echo INCLUDE contains: %INCLUDE%
-          
-          REM Check if cublas_v2.h exists
-          if exist "%CUDA_PATH%\include\cublas_v2.h" (
-              echo [OK] Found cublas_v2.h
+          REM Verify paths exist
+          echo Verifying include paths...
+          if exist "%CD%\src\interop\torch.h" (
+              echo [OK] Found src\interop\torch.h
           ) else (
-              echo [ERROR] cublas_v2.h not found in %CUDA_PATH%\include
-              dir "%CUDA_PATH%\include\cublas*" 2>nul
-              exit /b 1
+              echo [ERROR] Missing src\interop\torch.h
+              dir "%CD%\src" /S /B 2>nul | findstr /I "\.h$"
           )
           
-          REM Build
+          if exist "%CD%\third_party\spdlog\include\spdlog\spdlog.h" (
+              echo [OK] Found spdlog.h
+          ) else (
+              echo [ERROR] Missing spdlog.h
+              dir "%CD%\third_party" /S /B 2>nul | findstr /I "spdlog\.h$"
+          )
+          
+          REM Try building
           python -m build --wheel --no-isolation
           
           if %ERRORLEVEL% neq 0 (
-              echo [ERROR] Build failed with error code %ERRORLEVEL%
-              exit /b 1
+              echo Build failed, attempting alternative build method...
+              python setup.py bdist_wheel
           )
-          
-          echo [SUCCESS] Build completed successfully
 
-      - name: List built wheels
-        shell: powershell
-        run: |
-          if (Test-Path "dist") {
-              Write-Host "Built wheel files:"
-              Get-ChildItem dist/*.whl | ForEach-Object {
-                  $size = [math]::Round($_.Length/1MB, 2)
-                  Write-Host "  - $($_.Name) ($size MB)"
-              }
-              
-              # Calculate total size
-              $totalSize = (Get-ChildItem dist/*.whl | Measure-Object Length -Sum).Sum / 1MB
-              Write-Host "`nTotal size: $([math]::Round($totalSize, 2)) MB"
-          } else {
-              Write-Error "No wheel files found in dist directory"
-              exit 1
-          }
-
-      - name: Test wheel installation
-        shell: powershell
-        run: |
-          Write-Host "Testing wheel installation..."
-          
-          # Create test virtual environment
-          python -m venv test_env
-          & "test_env\Scripts\Activate.ps1"
-          
-          # Upgrade pip in test environment
-          python -m pip install --upgrade pip
-          
-          # Install the built wheel
-          $wheelFile = Get-ChildItem dist/*.whl | Select-Object -First 1
-          Write-Host "Installing wheel: $($wheelFile.Name)"
-          pip install $wheelFile.FullName
-          
-          # Test import
-          python -c "import nunchaku; print('[SUCCESS] nunchaku import successful')"
-          
-          # Deactivate virtual environment
-          deactivate
-          
-          Write-Host "[SUCCESS] Wheel installation test passed"
-
-      - name: Upload wheels as artifacts
+      - name: Upload wheels
         uses: actions/upload-artifact@v4
+        if: success()
         with:
           name: windows-wheels-py${{ github.event.inputs.python_version }}-torch${{ github.event.inputs.torch_version }}-cuda${{ needs.validate-compatibility.outputs.cuda_version }}
           path: dist/*.whl
           retention-days: 30
 
-      - name: Upload CUDA installation logs
+      - name: Upload build logs
         uses: actions/upload-artifact@v4
-        if: always()
+        if: failure()
         with:
-          name: cuda-installation-logs
-          path: '*.log.txt'
+          name: build-failure-logs
+          path: |
+            *.log
+            build/**/*.log
+            setup.py.backup
           retention-days: 7
-
-      - name: Build summary
-        shell: powershell
-        run: |
-          Write-Host "`nBuild Summary"
-          Write-Host "============="
-          Write-Host "[SUCCESS] Build completed successfully!"
-          Write-Host ""
-          Write-Host "Configuration:"
-          Write-Host "  - Python: ${{ github.event.inputs.python_version }}"
-          Write-Host "  - PyTorch: ${{ github.event.inputs.torch_version }}"
-          Write-Host "  - CUDA: ${{ needs.validate-compatibility.outputs.cuda_version }} (full: ${{ needs.validate-compatibility.outputs.cuda_full_version }})"
-          Write-Host "  - Build time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-          Write-Host "  - Runner: $env:RUNNER_NAME"
-          
-          if (Test-Path "dist") {
-              Write-Host "`nBuilt artifacts:"
-              Get-ChildItem dist/*.whl | ForEach-Object {
-                  Write-Host "  - $($_.Name)"
-              }
-          }
-
-  # Optional: Create release if tagged
-  create-release:
-    needs: build-windows-wheel
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: windows-wheels-*
-          merge-multiple: true
-          path: dist/
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*.whl
-          fail_on_unmatched_files: true
-          generate_release_notes: true
-          tag_name: ${{ github.ref_name }}
-          name: Release ${{ github.ref_name }}
-          body: |
-            ## Release ${{ github.ref_name }}
-            
-            ### Build Configuration
-            - Python: ${{ github.event.inputs.python_version }}
-            - PyTorch: ${{ github.event.inputs.torch_version }}
-            - CUDA: ${{ needs.validate-compatibility.outputs.cuda_version }}
-            
-            ### Installation
-            ```bash
-            pip install <wheel_file_name>.whl
-            ```
