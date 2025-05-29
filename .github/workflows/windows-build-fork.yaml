@@ -114,54 +114,19 @@ jobs:
           CUDA_SHORT_VERSION=${CUDA_VERSION//.}
           echo "torch_short_cuda=cu$CUDA_SHORT_VERSION" >> $GITHUB_OUTPUT
 
-  # Step 2: Main build job with optimized resources
+  # Step 2: Main build job
   build-windows-wheel:
     runs-on: windows-2022
     needs: validate-compatibility
     if: needs.validate-compatibility.outputs.is_compatible == 'true'
-    timeout-minutes: 180
-    
     steps:
-      - name: Check system resources
-        shell: powershell
-        run: |
-          Write-Host "System Information:"
-          Write-Host "==================="
-          
-          $totalMemory = (Get-WmiObject -Class Win32_ComputerSystem).TotalPhysicalMemory / 1GB
-          $freeMemory = (Get-WmiObject -Class Win32_OperatingSystem).FreePhysicalMemory / 1MB
-          Write-Host "Total Memory: $([math]::Round($totalMemory, 2)) GB"
-          Write-Host "Free Memory: $([math]::Round($freeMemory, 2)) MB"
-          
-          $cpu = Get-WmiObject -Class Win32_Processor
-          Write-Host "CPU: $($cpu.Name)"
-          Write-Host "CPU Cores: $($cpu.NumberOfCores)"
-          Write-Host "Logical Processors: $($cpu.NumberOfLogicalProcessors)"
-          
-          $disk = Get-WmiObject -Class Win32_LogicalDisk -Filter "DeviceID='C:'"
-          $freeSpace = $disk.FreeSpace / 1GB
-          Write-Host "Free Disk Space: $([math]::Round($freeSpace, 2)) GB"
-
-      - name: Configure Windows page file
-        shell: powershell
-        run: |
-          Write-Host "Configuring page file for additional virtual memory..."
-          try {
-              wmic computersystem set AutomaticManagedPagefile=False
-              wmic pagefileset delete
-              wmic pagefileset create name="C:\pagefile.sys"
-              wmic pagefileset set name="C:\pagefile.sys" InitialSize=16384 MaximumSize=32768
-              Write-Host "Page file configured successfully"
-          } catch {
-              Write-Host "Could not configure page file (requires admin privileges)"
-          }
-
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: recursive
 
+      # Initialize and verify submodules
       - name: Initialize and update submodules
         shell: powershell
         run: |
@@ -181,15 +146,18 @@ jobs:
               }
           }
 
+      # Download missing third-party dependencies if not submodules
       - name: Setup third-party dependencies
         shell: powershell
         run: |
           Write-Host "Checking and setting up third-party dependencies..."
           
+          # Create third_party directory if needed
           if (-not (Test-Path "third_party")) {
               New-Item -ItemType Directory -Path "third_party"
           }
           
+          # Download spdlog if missing
           if (-not (Test-Path "third_party/spdlog/include/spdlog/spdlog.h")) {
               Write-Host "Downloading spdlog..."
               if (Test-Path "third_party/spdlog") {
@@ -198,6 +166,7 @@ jobs:
               git clone --depth 1 --branch v1.12.0 https://github.com/gabime/spdlog.git third_party/spdlog
           }
           
+          # Download other dependencies if needed
           $dependencies = @{
               "json" = "https://github.com/nlohmann/json.git"
               "mio" = "https://github.com/mandreyel/mio.git"
@@ -210,6 +179,7 @@ jobs:
               }
           }
           
+          # Verify critical files exist
           Write-Host "`nVerifying critical files:"
           $criticalFiles = @(
               "third_party/spdlog/include/spdlog/spdlog.h",
@@ -225,11 +195,13 @@ jobs:
               }
           }
 
+      # Verify source structure
       - name: Verify project structure
         shell: powershell
         run: |
           Write-Host "Verifying project structure..."
           
+          # Check for src/interop directory and files
           if (Test-Path "src/interop") {
               Write-Host "[OK] Found src/interop directory"
               $interopFiles = Get-ChildItem "src/interop" -Filter "*.h" -ErrorAction SilentlyContinue
@@ -239,6 +211,7 @@ jobs:
               } else {
                   Write-Error "[ERROR] No header files found in src/interop"
                   
+                  # Try to find torch.h elsewhere
                   Write-Host "`nSearching for torch.h in the project:"
                   Get-ChildItem -Path . -Filter "torch.h" -Recurse -ErrorAction SilentlyContinue | 
                       Select-Object -First 5 | ForEach-Object { Write-Host "  Found at: $($_.FullName)" }
@@ -246,12 +219,14 @@ jobs:
           } else {
               Write-Error "[ERROR] src/interop directory not found!"
               
+              # List what's actually in src
               if (Test-Path "src") {
                   Write-Host "`nContents of src directory:"
                   Get-ChildItem "src" -Name | ForEach-Object { Write-Host "  - $_" }
               }
           }
           
+          # Check all expected directories
           $expectedDirs = @(
               "src",
               "src/interop",
@@ -319,54 +294,32 @@ jobs:
           $indexUrl = "https://download.pytorch.org/whl/$torchCudaVersion"
           pip install --no-cache-dir "torch==$torchVersion" "torchvision==$torchvisionVersion" "torchaudio==$torchaudioVersion" --index-url $indexUrl
 
-      - name: Set optimized build environment variables
+      - name: Set build environment variables
         shell: cmd
         run: |
           set NUNCHAKU_INSTALL_MODE=ALL
           set NUNCHAKU_BUILD_WHEELS=1
           set DISTUTILS_USE_SDK=1
-          
-          set MAX_JOBS=1
-          set TORCH_CUDA_ARCH_LIST=8.0
-          
-          set CL=/MP1 /O1 /GS- /Gy /Gw
-          
-          set NVCC_APPEND_FLAGS=--threads 1 --optimize 1 --use_fast_math --ptxas-options=-v --maxrregcount=128 -Xcompiler "/wd4819 /wd4251 /wd4244 /wd4267 /wd4275 /wd4018 /wd4190 /wd4624 /wd4067 /wd4068"
-          
-          set CUDA_NVCC_FLAGS=--threads 1 --default-stream per-thread
-          set CUTLASS_NVCC_ARCHS=80
+          set MAX_JOBS=2
+          set CL=/MP
           
           set CUDA_HOME=%CUDA_PATH%
           set CUDA_TOOLKIT_ROOT_DIR=%CUDA_PATH%
           set CUDACXX=%CUDA_PATH%\bin\nvcc.exe
           
+          REM Update paths to include all necessary directories
           set INCLUDE=%CUDA_PATH%\include;src;third_party\spdlog\include;third_party\json\include;third_party\mio\include;third_party\cutlass\include;%INCLUDE%
           set LIB=%CUDA_PATH%\lib\x64;%LIB%
           
+          REM Save to GitHub env
           echo NUNCHAKU_INSTALL_MODE=ALL>> %GITHUB_ENV%
           echo NUNCHAKU_BUILD_WHEELS=1>> %GITHUB_ENV%
           echo DISTUTILS_USE_SDK=1>> %GITHUB_ENV%
-          echo MAX_JOBS=1>> %GITHUB_ENV%
-          echo TORCH_CUDA_ARCH_LIST=8.0>> %GITHUB_ENV%
-          echo CL=/MP1 /O1 /GS- /Gy /Gw>> %GITHUB_ENV%
-          echo NVCC_APPEND_FLAGS=--threads 1 --optimize 1 --use_fast_math --ptxas-options=-v --maxrregcount=128 -Xcompiler "/wd4819 /wd4251 /wd4244 /wd4267 /wd4275 /wd4018 /wd4190 /wd4624 /wd4067 /wd4068">> %GITHUB_ENV%
-          echo CUDA_NVCC_FLAGS=--threads 1 --default-stream per-thread>> %GITHUB_ENV%
-          echo CUTLASS_NVCC_ARCHS=80>> %GITHUB_ENV%
+          echo MAX_JOBS=2>> %GITHUB_ENV%
+          echo CL=/MP>> %GITHUB_ENV%
           echo CUDA_HOME=%CUDA_PATH%>> %GITHUB_ENV%
           echo CUDA_TOOLKIT_ROOT_DIR=%CUDA_PATH%>> %GITHUB_ENV%
           echo CUDACXX=%CUDA_PATH%\bin\nvcc.exe>> %GITHUB_ENV%
-
-      - name: Create memory optimization script
-        shell: powershell
-        run: |
-          $content = @'
-import os
-os.environ['TORCH_CUDA_ARCH_LIST'] = '8.0'
-os.environ['MAX_JOBS'] = '1'
-os.environ['NVCC_APPEND_FLAGS'] = '--threads 1 --optimize 1 --use_fast_math --maxrregcount=128'
-'@
-          Set-Content -Path "cuda_memory_opt.py" -Value $content
-          Write-Host "Created cuda_memory_opt.py"
 
       - name: Clean build directory
         shell: cmd
@@ -374,96 +327,56 @@ os.environ['NVCC_APPEND_FLAGS'] = '--threads 1 --optimize 1 --use_fast_math --ma
           if exist build rd /s /q build
           if exist dist rd /s /q dist
           if exist *.egg-info rd /s /q *.egg-info
-          
-          if exist "%LOCALAPPDATA%\NVIDIA\ComputeCache" rd /s /q "%LOCALAPPDATA%\NVIDIA\ComputeCache"
 
+      # Attempt to create missing files if needed
       - name: Create missing interop files (if needed)
         shell: powershell
         run: |
+          # Only create if src/interop exists but torch.h is missing
           if ((Test-Path "src/interop") -and -not (Test-Path "src/interop/torch.h")) {
               Write-Host "Creating placeholder interop/torch.h..."
               
+              # Create a minimal torch.h that includes the actual PyTorch headers
               $content = "#pragma once`n#include <torch/torch.h>`n#include <torch/extension.h>`n"
               [System.IO.File]::WriteAllText("src/interop/torch.h", $content, [System.Text.Encoding]::ASCII)
               Write-Host "Created minimal src/interop/torch.h"
           }
 
-      - name: Monitor memory during build
-        shell: powershell
-        run: |
-          $monitorJob = Start-Job -ScriptBlock {
-              while ($true) {
-                  $mem = Get-WmiObject -Class Win32_OperatingSystem
-                  $totalMem = $mem.TotalVisibleMemorySize / 1MB
-                  $freeMem = $mem.FreePhysicalMemory / 1MB
-                  $usedMem = $totalMem - $freeMem
-                  $percentUsed = [math]::Round(($usedMem / $totalMem) * 100, 2)
-                  
-                  $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-                  "$timestamp - Memory Usage: $([math]::Round($usedMem, 2)) MB / $([math]::Round($totalMem, 2)) MB ($percentUsed%)"
-                  
-                  Start-Sleep -Seconds 30
-              }
-          }
-          
-          $monitorJob.Id | Out-File -FilePath "monitor_job_id.txt"
-
-      - name: Build wheel with memory monitoring
+      - name: Build wheel
         shell: cmd
         run: |
-          echo Starting wheel build with memory optimizations...
+          echo Starting wheel build...
           
+          REM Setup Visual Studio environment
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 || (
               call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
           )
           
+          REM Set all environment variables again
           set CUDA_HOME=%CUDA_PATH%
           set CUDA_TOOLKIT_ROOT_DIR=%CUDA_PATH%
           set CUDACXX=%CUDA_PATH%\bin\nvcc.exe
           set PATH=%CUDA_PATH%\bin;%PATH%
           
-          set MAX_JOBS=1
-          set TORCH_CUDA_ARCH_LIST=8.0
-          set NVCC_APPEND_FLAGS=--threads 1 --optimize 1 --use_fast_math --maxrregcount=128
-          set CUDA_NVCC_FLAGS=--threads 1 --default-stream per-thread
-          
+          REM Ensure include paths are set correctly
           set INCLUDE=%CUDA_PATH%\include;src;src\interop;third_party\spdlog\include;third_party\json\include;third_party\mio\include;third_party\cutlass\include;third_party\Block-Sparse-Attention\csrc\block_sparse_attn;%INCLUDE%
           set LIB=%CUDA_PATH%\lib\x64;%LIB%
           
-          echo Building with MAX_JOBS=1 to prevent memory exhaustion...
+          REM Build
           python -m build --wheel --no-isolation
           
           if %ERRORLEVEL% neq 0 (
               echo [ERROR] Build failed with error code %ERRORLEVEL%
               
-              echo Trying alternative build with setup.py directly and minimal settings...
-              set TORCH_CUDA_ARCH_LIST=8.0
-              set MAX_JOBS=1
-              set NVCC_THREADS=1
-              
-              python setup.py bdist_wheel --plat-name win_amd64
+              REM Try alternative build command
+              echo Trying alternative build with setup.py directly...
+              python setup.py bdist_wheel
               
               if %ERRORLEVEL% neq 0 (
                   echo [ERROR] Alternative build also failed
-                  
-                  echo Attempting component-wise build...
-                  python setup.py build_ext --inplace
-                  if %ERRORLEVEL% equ 0 (
-                      python setup.py bdist_wheel
-                  )
+                  exit /b 1
               )
           )
-
-      - name: Stop memory monitoring
-        shell: powershell
-        if: always()
-        run: |
-          if (Test-Path "monitor_job_id.txt") {
-              $jobId = Get-Content "monitor_job_id.txt"
-              Stop-Job -Id $jobId -ErrorAction SilentlyContinue
-              Remove-Job -Id $jobId -ErrorAction SilentlyContinue
-              Remove-Item "monitor_job_id.txt"
-          }
 
       - name: List built wheels
         shell: powershell
@@ -476,14 +389,6 @@ os.environ['NVCC_APPEND_FLAGS'] = '--threads 1 --optimize 1 --use_fast_math --ma
               }
           } else {
               Write-Error "No wheel files found"
-              
-              Write-Host "`nChecking for build artifacts:"
-              if (Test-Path "build") {
-                  Get-ChildItem "build" -Recurse -Filter "*.pyd" | ForEach-Object {
-                      Write-Host "Found extension: $($_.FullName)"
-                  }
-              }
-              
               exit 1
           }
 
@@ -503,26 +408,5 @@ os.environ['NVCC_APPEND_FLAGS'] = '--threads 1 --optimize 1 --use_fast_math --ma
             *.log
             build/**/*.log
             setup.py
-            setup.py.backup
             pyproject.toml
-            build/temp*/**/*.d
-            build/temp*/**/*.obj.d
           retention-days: 7
-
-      - name: Collect detailed error information on failure
-        if: failure()
-        shell: powershell
-        run: |
-          Write-Host "Collecting detailed error information..."
-          
-          Get-ChildItem -Path . -Filter "*.log" -Recurse | ForEach-Object {
-              Write-Host "`n=== Content of $($_.FullName) ==="
-              Get-Content $_.FullName -Tail 100
-          }
-          
-          if (Test-Path "build") {
-              Write-Host "`n=== CUDA compilation artifacts ==="
-              Get-ChildItem -Path "build" -Filter "*.cu.obj" -Recurse | ForEach-Object {
-                  Write-Host "Found: $($_.FullName) - Size: $($_.Length) bytes"
-              }
-          }
