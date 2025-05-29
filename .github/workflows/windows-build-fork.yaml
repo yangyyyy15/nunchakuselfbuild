@@ -1,4 +1,4 @@
-name: Windows Build - Fixed Dependencies
+name: Windows Build - Optimized CUDA Installation
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
       python_version:
         description: 'Python version'
         required: true
-        default: '3.11'
+        default: '3.10'
         type: choice
         options:
           - '3.10'
@@ -15,7 +15,7 @@ on:
       torch_version:
         description: 'PyTorch version'
         required: true
-        default: '2.5'
+        default: '2.7'
         type: choice
         options:
           - '2.5'
@@ -24,7 +24,7 @@ on:
       cuda_version:
         description: 'CUDA version'
         required: true
-        default: '12.4'
+        default: '12.8'
         type: choice
         options:
           - '12.1'
@@ -36,6 +36,7 @@ permissions:
   contents: write
 
 jobs:
+  # Step 1: Validate version compatibility
   validate-compatibility:
     runs-on: ubuntu-latest
     outputs:
@@ -49,9 +50,9 @@ jobs:
       - name: Check PyTorch and CUDA compatibility
         id: check
         run: |
-          PYTHON_VERSION="${{ github.event.inputs.python_version || '3.11' }}"
-          TORCH_VERSION="${{ github.event.inputs.torch_version || '2.5' }}"
-          CUDA_VERSION="${{ github.event.inputs.cuda_version || '12.4' }}"
+          PYTHON_VERSION="${{ github.event.inputs.python_version || '3.10' }}"
+          TORCH_VERSION="${{ github.event.inputs.torch_version || '2.7' }}"
+          CUDA_VERSION="${{ github.event.inputs.cuda_version || '12.8' }}"
           
           echo "Checking compatibility for PyTorch $TORCH_VERSION with CUDA $CUDA_VERSION"
           
@@ -113,6 +114,7 @@ jobs:
           CUDA_SHORT_VERSION=${CUDA_VERSION//.}
           echo "torch_short_cuda=cu$CUDA_SHORT_VERSION" >> $GITHUB_OUTPUT
 
+  # Step 2: Main build job
   build-windows-wheel:
     runs-on: windows-2022
     needs: validate-compatibility
@@ -122,118 +124,147 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: recursive  # Changed from 'true' to 'recursive'
+          submodules: recursive  # Changed from true to recursive
 
-      # Fix 1: Initialize and update submodules explicitly
+      # CRITICAL: Initialize and verify submodules
       - name: Initialize and update submodules
-        shell: cmd
-        run: |
-          echo Initializing git submodules...
-          git submodule update --init --recursive --depth 1
-          
-          echo Checking submodule status...
-          git submodule status
-          
-          REM Check if third_party directories exist and have content
-          if exist "third_party\spdlog" (
-              echo [OK] Found third_party\spdlog
-              dir "third_party\spdlog" /B | findstr /R "." >nul || (
-                  echo [ERROR] third_party\spdlog is empty
-                  exit /b 1
-              )
-          ) else (
-              echo [ERROR] third_party\spdlog not found
-              exit /b 1
-          )
-          
-          if exist "third_party\cutlass" (
-              echo [OK] Found third_party\cutlass
-          ) else (
-              echo [WARNING] third_party\cutlass not found
-          )
-          
-          if exist "third_party\json" (
-              echo [OK] Found third_party\json
-          ) else (
-              echo [WARNING] third_party\json not found
-          )
-
-      # Fix 2: Download missing dependencies if submodules fail
-      - name: Download missing dependencies
         shell: powershell
         run: |
-          Write-Host "Checking and downloading missing dependencies..."
+          Write-Host "Initializing git submodules..."
+          git submodule update --init --recursive --force
           
-          # Create directories if they don't exist
-          $thirdPartyDirs = @{
-              "spdlog" = "https://github.com/gabime/spdlog/archive/refs/tags/v1.12.0.zip"
-              "json" = "https://github.com/nlohmann/json/releases/download/v3.11.2/include.zip"
-              "mio" = "https://github.com/mandreyel/mio/archive/refs/heads/master.zip"
+          Write-Host "`nSubmodule status:"
+          git submodule status
+          
+          Write-Host "`nVerifying submodule directories:"
+          $submodulePaths = git config --file .gitmodules --get-regexp path | ForEach-Object { $_.Split(' ')[1] }
+          foreach ($path in $submodulePaths) {
+              if (Test-Path $path) {
+                  Write-Host "[OK] Found submodule: $path"
+              } else {
+                  Write-Warning "[WARNING] Missing submodule: $path"
+              }
+          }
+
+      # Download missing third-party dependencies if not submodules
+      - name: Setup third-party dependencies
+        shell: powershell
+        run: |
+          Write-Host "Checking and setting up third-party dependencies..."
+          
+          # Create third_party directory if needed
+          if (-not (Test-Path "third_party")) {
+              New-Item -ItemType Directory -Path "third_party"
           }
           
-          foreach ($dep in $thirdPartyDirs.GetEnumerator()) {
-              $depPath = "third_party\$($dep.Key)"
-              
-              if (-not (Test-Path $depPath) -or (Get-ChildItem $depPath -Recurse | Measure-Object).Count -eq 0) {
-                  Write-Host "Downloading $($dep.Key)..."
-                  
-                  $tempZip = "temp_$($dep.Key).zip"
-                  Invoke-WebRequest -Uri $dep.Value -OutFile $tempZip
-                  
-                  # Extract to temp directory
-                  $tempExtract = "temp_extract_$($dep.Key)"
-                  Expand-Archive -Path $tempZip -DestinationPath $tempExtract -Force
-                  
-                  # Create third_party directory if it doesn't exist
-                  if (-not (Test-Path "third_party")) {
-                      New-Item -ItemType Directory -Path "third_party" -Force
-                  }
-                  
-                  # Move extracted content to correct location
-                  if (-not (Test-Path $depPath)) {
-                      New-Item -ItemType Directory -Path $depPath -Force
-                  }
-                  
-                  # Find the actual content directory (usually one level deep)
-                  $extractedContent = Get-ChildItem $tempExtract -Directory | Select-Object -First 1
-                  if ($extractedContent) {
-                      Copy-Item -Path "$($extractedContent.FullName)\*" -Destination $depPath -Recurse -Force
-                  }
-                  
-                  # Cleanup
-                  Remove-Item $tempZip -Force
-                  Remove-Item $tempExtract -Recurse -Force
-                  
-                  Write-Host "[OK] Downloaded $($dep.Key)"
+          # Download spdlog if missing
+          if (-not (Test-Path "third_party/spdlog/include/spdlog/spdlog.h")) {
+              Write-Host "Downloading spdlog..."
+              if (Test-Path "third_party/spdlog") {
+                  Remove-Item -Path "third_party/spdlog" -Recurse -Force
+              }
+              git clone --depth 1 --branch v1.12.0 https://github.com/gabime/spdlog.git third_party/spdlog
+          }
+          
+          # Download other dependencies if needed
+          $dependencies = @{
+              "json" = "https://github.com/nlohmann/json.git"
+              "mio" = "https://github.com/mandreyel/mio.git"
+          }
+          
+          foreach ($dep in $dependencies.Keys) {
+              if (-not (Test-Path "third_party/$dep")) {
+                  Write-Host "Downloading $dep..."
+                  git clone --depth 1 $dependencies[$dep] "third_party/$dep"
               }
           }
           
-          # Check if src/interop exists, if not create it with a basic torch.h
-          if (-not (Test-Path "src\interop")) {
-              Write-Host "Creating src\interop directory..."
-              New-Item -ItemType Directory -Path "src\interop" -Force
-              
-              # Create a basic torch.h file
-              @"
-#pragma once
-#include <torch/torch.h>
-#include <torch/script.h>
+          # Verify critical files exist
+          Write-Host "`nVerifying critical files:"
+          $criticalFiles = @(
+              "third_party/spdlog/include/spdlog/spdlog.h",
+              "third_party/json/include/nlohmann/json.hpp",
+              "third_party/cutlass/include/cutlass/cutlass.h"
+          )
+          
+          foreach ($file in $criticalFiles) {
+              if (Test-Path $file) {
+                  Write-Host "[OK] Found: $file"
+              } else {
+                  Write-Warning "[WARNING] Missing: $file"
+              }
+          }
 
-namespace nunchaku {
-namespace interop {
-    // Basic torch interop utilities
-}
-}
-"@ | Set-Content -Path "src\interop\torch.h"
-              Write-Host "[OK] Created src\interop\torch.h"
+      # Verify source structure
+      - name: Verify project structure
+        shell: powershell
+        run: |
+          Write-Host "Verifying project structure..."
+          
+          # Check for src/interop directory and files
+          if (Test-Path "src/interop") {
+              Write-Host "[OK] Found src/interop directory"
+              $interopFiles = Get-ChildItem "src/interop" -Filter "*.h" -ErrorAction SilentlyContinue
+              if ($interopFiles) {
+                  Write-Host "Header files in src/interop:"
+                  $interopFiles | ForEach-Object { Write-Host "  - $($_.Name)" }
+              } else {
+                  Write-Error "[ERROR] No header files found in src/interop"
+                  
+                  # Try to find torch.h elsewhere
+                  Write-Host "`nSearching for torch.h in the project:"
+                  Get-ChildItem -Path . -Filter "torch.h" -Recurse -ErrorAction SilentlyContinue | 
+                      Select-Object -First 5 | ForEach-Object { Write-Host "  Found at: $($_.FullName)" }
+              }
+          } else {
+              Write-Error "[ERROR] src/interop directory not found!"
+              
+              # List what's actually in src
+              if (Test-Path "src") {
+                  Write-Host "`nContents of src directory:"
+                  Get-ChildItem "src" -Name | ForEach-Object { Write-Host "  - $_" }
+              }
+          }
+          
+          # Check all expected directories
+          $expectedDirs = @(
+              "src",
+              "src/interop",
+              "src/kernels",
+              "nunchaku",
+              "nunchaku/csrc",
+              "third_party/cutlass",
+              "third_party/json",
+              "third_party/mio",
+              "third_party/spdlog",
+              "third_party/Block-Sparse-Attention"
+          )
+          
+          $missingDirs = @()
+          foreach ($dir in $expectedDirs) {
+              if (Test-Path $dir) {
+                  Write-Host "[OK] Found: $dir"
+              } else {
+                  Write-Warning "[MISSING] $dir"
+                  $missingDirs += $dir
+              }
+          }
+          
+          if ($missingDirs.Count -gt 0) {
+              Write-Host "`nProject structure check failed. Missing directories:"
+              $missingDirs | ForEach-Object { Write-Host "  - $_" }
+              
+              Write-Host "`nFull directory tree (first 3 levels):"
+              Get-ChildItem -Recurse -Depth 2 -Directory | Select-Object -First 50 | 
+                  ForEach-Object { Write-Host $_.FullName.Replace($PWD, ".") }
           }
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ github.event.inputs.python_version || '3.11' }}
+          python-version: ${{ github.event.inputs.python_version || '3.10' }}
 
-      - name: Install CUDA
+      - name: Install CUDA using cuda-toolkit action
         uses: Jimver/cuda-toolkit@v0.2.23
         id: cuda-toolkit
         with:
@@ -242,7 +273,7 @@ namespace interop {
           use-github-cache: true
           use-local-cache: true
 
-      - name: Setup Visual Studio
+      - name: Setup Visual Studio environment
         uses: microsoft/setup-msbuild@v2
         with:
           vs-version: '[17.0,18.0)'
@@ -252,10 +283,10 @@ namespace interop {
           python -m pip install --upgrade pip
           pip install ninja setuptools wheel build packaging
 
-      - name: Install PyTorch
+      - name: Install PyTorch with correct CUDA version
         shell: powershell
         run: |
-          $torchVersion = "${{ github.event.inputs.torch_version || '2.5' }}"
+          $torchVersion = "${{ github.event.inputs.torch_version || '2.7' }}"
           $torchvisionVersion = "${{ needs.validate-compatibility.outputs.torchvision_version }}"
           $torchaudioVersion = "${{ needs.validate-compatibility.outputs.torchaudio_version }}"
           $torchCudaVersion = "${{ needs.validate-compatibility.outputs.torch_short_cuda }}"
@@ -263,127 +294,116 @@ namespace interop {
           $indexUrl = "https://download.pytorch.org/whl/$torchCudaVersion"
           pip install --no-cache-dir "torch==$torchVersion" "torchvision==$torchvisionVersion" "torchaudio==$torchaudioVersion" --index-url $indexUrl
 
-      # Fix 3: Create a setup.py if it doesn't exist or fix the existing one
-      - name: Fix setup configuration
-        shell: powershell
-        run: |
-          Write-Host "Checking setup configuration..."
-          
-          # Check if setup.py exists
-          if (Test-Path "setup.py") {
-              Write-Host "Found setup.py, checking for package configuration..."
-              
-              # Create a backup
-              Copy-Item "setup.py" "setup.py.backup"
-              
-              # Read the setup.py content
-              $setupContent = Get-Content "setup.py" -Raw
-              
-              # Check if it uses find_packages correctly
-              if ($setupContent -notmatch "find_namespace_packages|find_packages") {
-                  Write-Host "Adding find_packages to setup.py..."
-                  # This is a simplified fix - in reality you'd need to parse and modify properly
-              }
-          }
-          
-          # Ensure pyproject.toml has correct configuration
-          if (Test-Path "pyproject.toml") {
-              Write-Host "Found pyproject.toml"
-              $pyprojectContent = Get-Content "pyproject.toml" -Raw
-              
-              # Check if packages are properly defined
-              if ($pyprojectContent -notmatch '\[tool\.setuptools\.packages\]') {
-                  Write-Host "Adding package configuration to pyproject.toml..."
-                  Add-Content -Path "pyproject.toml" -Value @"
-
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["nunchaku*"]
-"@
-              }
-          }
-
-      # Fix 4: Set include paths correctly
-      - name: Set build environment
+      - name: Set build environment variables
         shell: cmd
         run: |
-          echo Setting build environment...
-          
-          REM Setup Visual Studio environment
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
-          
-          REM Set environment variables
           set NUNCHAKU_INSTALL_MODE=ALL
           set NUNCHAKU_BUILD_WHEELS=1
           set DISTUTILS_USE_SDK=1
           set MAX_JOBS=2
           set CL=/MP
           
-          REM CUDA environment
           set CUDA_HOME=%CUDA_PATH%
           set CUDA_TOOLKIT_ROOT_DIR=%CUDA_PATH%
           set CUDACXX=%CUDA_PATH%\bin\nvcc.exe
           
-          REM Include paths - add project directories
-          set INCLUDE=%CD%\src;%CD%\third_party\spdlog\include;%CD%\third_party\json\include;%CD%\third_party\mio\include;%CD%\third_party\cutlass\include;%CUDA_PATH%\include;%INCLUDE%
+          REM Update paths to include all necessary directories
+          set INCLUDE=%CUDA_PATH%\include;src;third_party\spdlog\include;third_party\json\include;third_party\mio\include;third_party\cutlass\include;%INCLUDE%
           set LIB=%CUDA_PATH%\lib\x64;%LIB%
           
           REM Save to GitHub env
-          echo INCLUDE=%INCLUDE%>> %GITHUB_ENV%
-          echo LIB=%LIB%>> %GITHUB_ENV%
-          echo CUDA_HOME=%CUDA_HOME%>> %GITHUB_ENV%
-          echo CUDA_TOOLKIT_ROOT_DIR=%CUDA_TOOLKIT_ROOT_DIR%>> %GITHUB_ENV%
-          echo CUDACXX=%CUDACXX%>> %GITHUB_ENV%
           echo NUNCHAKU_INSTALL_MODE=ALL>> %GITHUB_ENV%
           echo NUNCHAKU_BUILD_WHEELS=1>> %GITHUB_ENV%
           echo DISTUTILS_USE_SDK=1>> %GITHUB_ENV%
           echo MAX_JOBS=2>> %GITHUB_ENV%
           echo CL=/MP>> %GITHUB_ENV%
+          echo CUDA_HOME=%CUDA_PATH%>> %GITHUB_ENV%
+          echo CUDA_TOOLKIT_ROOT_DIR=%CUDA_PATH%>> %GITHUB_ENV%
+          echo CUDACXX=%CUDA_PATH%\bin\nvcc.exe>> %GITHUB_ENV%
+
+      - name: Clean build directory
+        shell: cmd
+        run: |
+          if exist build rd /s /q build
+          if exist dist rd /s /q dist
+          if exist *.egg-info rd /s /q *.egg-info
+
+      # Attempt to create missing files if needed
+      - name: Create missing interop files (if needed)
+        shell: powershell
+        run: |
+          # Only create if src/interop exists but torch.h is missing
+          if ((Test-Path "src/interop") -and -not (Test-Path "src/interop/torch.h")) {
+              Write-Host "Creating placeholder interop/torch.h..."
+              
+              # Create a minimal torch.h that includes the actual PyTorch headers
+              $torchHeader = @"
+#pragma once
+#include <torch/torch.h>
+#include <torch/extension.h>
+"@
+              $torchHeader | Out-File -FilePath "src/interop/torch.h" -Encoding ASCII
+              Write-Host "Created minimal src/interop/torch.h"
+          }
 
       - name: Build wheel
         shell: cmd
         run: |
-          echo Starting build...
+          echo Starting wheel build...
           
-          REM Re-setup VS environment
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
-          
-          REM Re-set critical paths with absolute paths
-          set INCLUDE=%CD%\src;%CD%\third_party\spdlog\include;%CD%\third_party\json\include;%CD%\third_party\mio\include;%CUDA_PATH%\include;%INCLUDE%
-          
-          REM Verify paths exist
-          echo Verifying include paths...
-          if exist "%CD%\src\interop\torch.h" (
-              echo [OK] Found src\interop\torch.h
-          ) else (
-              echo [ERROR] Missing src\interop\torch.h
-              dir "%CD%\src" /S /B 2>nul | findstr /I "\.h$"
+          REM Setup Visual Studio environment
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 || (
+              call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
           )
           
-          if exist "%CD%\third_party\spdlog\include\spdlog\spdlog.h" (
-              echo [OK] Found spdlog.h
-          ) else (
-              echo [ERROR] Missing spdlog.h
-              dir "%CD%\third_party" /S /B 2>nul | findstr /I "spdlog\.h$"
-          )
+          REM Set all environment variables again
+          set CUDA_HOME=%CUDA_PATH%
+          set CUDA_TOOLKIT_ROOT_DIR=%CUDA_PATH%
+          set CUDACXX=%CUDA_PATH%\bin\nvcc.exe
+          set PATH=%CUDA_PATH%\bin;%PATH%
           
-          REM Try building
+          REM Ensure include paths are set correctly
+          set INCLUDE=%CUDA_PATH%\include;src;src\interop;third_party\spdlog\include;third_party\json\include;third_party\mio\include;third_party\cutlass\include;third_party\Block-Sparse-Attention\csrc\block_sparse_attn;%INCLUDE%
+          set LIB=%CUDA_PATH%\lib\x64;%LIB%
+          
+          REM Build
           python -m build --wheel --no-isolation
           
           if %ERRORLEVEL% neq 0 (
-              echo Build failed, attempting alternative build method...
+              echo [ERROR] Build failed with error code %ERRORLEVEL%
+              
+              REM Try alternative build command
+              echo Trying alternative build with setup.py directly...
               python setup.py bdist_wheel
+              
+              if %ERRORLEVEL% neq 0 (
+                  echo [ERROR] Alternative build also failed
+                  exit /b 1
+              )
           )
 
-      - name: Upload wheels
+      - name: List built wheels
+        shell: powershell
+        run: |
+          if (Test-Path "dist") {
+              Write-Host "Built wheel files:"
+              Get-ChildItem dist/*.whl | ForEach-Object {
+                  $size = [math]::Round($_.Length/1MB, 2)
+                  Write-Host "  - $($_.Name) ($size MB)"
+              }
+          } else {
+              Write-Error "No wheel files found"
+              exit 1
+          }
+
+      - name: Upload wheels as artifacts
         uses: actions/upload-artifact@v4
-        if: success()
         with:
           name: windows-wheels-py${{ github.event.inputs.python_version }}-torch${{ github.event.inputs.torch_version }}-cuda${{ needs.validate-compatibility.outputs.cuda_version }}
           path: dist/*.whl
           retention-days: 30
 
-      - name: Upload build logs
+      - name: Upload build logs on failure
         uses: actions/upload-artifact@v4
         if: failure()
         with:
@@ -391,5 +411,6 @@ include = ["nunchaku*"]
           path: |
             *.log
             build/**/*.log
-            setup.py.backup
+            setup.py
+            pyproject.toml
           retention-days: 7
