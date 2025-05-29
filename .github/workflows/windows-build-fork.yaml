@@ -1,4 +1,4 @@
-name: Windows Build - Fixed CUDA Version Issues
+name: Windows Build - Optimized CUDA Installation
 
 on:
   workflow_dispatch:
@@ -36,13 +36,16 @@ permissions:
   contents: write
 
 jobs:
-  # Validate version compatibility
+  # Step 1: Validate version compatibility
   validate-compatibility:
     runs-on: ubuntu-latest
     outputs:
       is_compatible: ${{ steps.check.outputs.is_compatible }}
       cuda_version: ${{ steps.check.outputs.cuda_version }}
+      cuda_full_version: ${{ steps.check.outputs.cuda_full_version }}
       torch_short_cuda: ${{ steps.check.outputs.torch_short_cuda }}
+      torchvision_version: ${{ steps.check.outputs.torchvision_version }}
+      torchaudio_version: ${{ steps.check.outputs.torchaudio_version }}
     steps:
       - name: Check PyTorch and CUDA compatibility
         id: check
@@ -53,23 +56,47 @@ jobs:
           
           echo "Checking compatibility for PyTorch $TORCH_VERSION with CUDA $CUDA_VERSION"
           
-          # Define compatibility matrix
+          # Define compatibility matrix with specific CUDA versions supported by cuda-toolkit action
           COMPATIBLE=false
+          CUDA_FULL_VERSION=""
           case "$TORCH_VERSION" in
             "2.5")
               case "$CUDA_VERSION" in
-                "12.1"|"12.4") COMPATIBLE=true ;;
+                "12.1") 
+                  COMPATIBLE=true
+                  CUDA_FULL_VERSION="12.1.0"
+                  ;;
+                "12.4") 
+                  COMPATIBLE=true
+                  CUDA_FULL_VERSION="12.4.0"
+                  ;;
               esac
+              TORCHVISION_VERSION="0.20"
+              TORCHAUDIO_VERSION="2.5"
               ;;
             "2.6")
               case "$CUDA_VERSION" in
-                "12.4"|"12.6") COMPATIBLE=true ;;
+                "12.4") 
+                  COMPATIBLE=true
+                  CUDA_FULL_VERSION="12.4.0"
+                  ;;
+                "12.6") 
+                  COMPATIBLE=true
+                  CUDA_FULL_VERSION="12.6.0"
+                  ;;
               esac
+              TORCHVISION_VERSION="0.21"
+              TORCHAUDIO_VERSION="2.6"
               ;;
             "2.7")
               case "$CUDA_VERSION" in
-                "12.8") COMPATIBLE=true ;;
+                "12.8") 
+                  COMPATIBLE=true
+                  CUDA_FULL_VERSION="12.8.0"
+                  ;;
               esac
+              TORCHVISION_VERSION="0.22"
+              TORCHAUDIO_VERSION="2.7"
               ;;
           esac
           
@@ -82,17 +109,26 @@ jobs:
             exit 1
           fi
           
-          echo "Version compatible: PyTorch $TORCH_VERSION + CUDA $CUDA_VERSION"
+          echo "✅ Version compatible: PyTorch $TORCH_VERSION + CUDA $CUDA_VERSION"
           
           # Output results
           echo "is_compatible=true" >> $GITHUB_OUTPUT
           echo "cuda_version=$CUDA_VERSION" >> $GITHUB_OUTPUT
+          echo "cuda_full_version=$CUDA_FULL_VERSION" >> $GITHUB_OUTPUT
+          echo "torchvision_version=$TORCHVISION_VERSION" >> $GITHUB_OUTPUT
+          echo "torchaudio_version=$TORCHAUDIO_VERSION" >> $GITHUB_OUTPUT
           
           # Calculate PyTorch index URL CUDA version
           CUDA_SHORT_VERSION=${CUDA_VERSION//.}
           echo "torch_short_cuda=cu$CUDA_SHORT_VERSION" >> $GITHUB_OUTPUT
+          
+          echo "Summary:"
+          echo "  - CUDA full version: $CUDA_FULL_VERSION"
+          echo "  - PyTorch CUDA index: cu$CUDA_SHORT_VERSION"
+          echo "  - Torchvision: $TORCHVISION_VERSION"
+          echo "  - Torchaudio: $TORCHAUDIO_VERSION"
 
-  # Main build job
+  # Step 2: Main build job with optimized CUDA installation
   build-windows-wheel:
     runs-on: windows-2022
     needs: validate-compatibility
@@ -109,174 +145,60 @@ jobs:
         with:
           python-version: ${{ github.event.inputs.python_version || '3.10' }}
 
-      - name: Download and Install CUDA
-        shell: powershell
-        run: |
-          $cudaVersion = "${{ needs.validate-compatibility.outputs.cuda_version }}"
-          
-          Write-Host "Starting CUDA $cudaVersion installation..."
-          
-          # Method 1: Try direct download and install
-          try {
-              # Define download URLs for each CUDA version
-              $cudaUrls = @{
-                  "12.1" = "https://developer.download.nvidia.com/compute/cuda/12.1.0/local_installers/cuda_12.1.0_531.14_windows.exe"
-                  "12.4" = "https://developer.download.nvidia.com/compute/cuda/12.4.1/local_installers/cuda_12.4.1_551.78_windows.exe"
-                  "12.6" = "https://developer.download.nvidia.com/compute/cuda/12.6.2/local_installers/cuda_12.6.2_560.94_windows.exe"
-                  "12.8" = "https://developer.download.nvidia.com/compute/cuda/12.8.0/local_installers/cuda_12.8.0_571.96_windows.exe"
-              }
-              
-              # Get download URL
-              $downloadUrl = $cudaUrls[$cudaVersion]
-              if (-not $downloadUrl) {
-                  throw "Download URL not found for CUDA version $cudaVersion"
-              }
-              
-              Write-Host "Downloading CUDA $cudaVersion..."
-              Write-Host "Download URL: $downloadUrl"
-              
-              $installerPath = "cuda_installer.exe"
-              
-              # Download CUDA installer with retry mechanism
-              $maxRetries = 3
-              $retryCount = 0
-              $downloadSuccess = $false
-              
-              do {
-                  try {
-                      Write-Host "Download attempt $($retryCount + 1)/$maxRetries..."
-                      Invoke-WebRequest -Uri $downloadUrl -OutFile $installerPath -TimeoutSec 1800
-                      $downloadSuccess = $true
-                      break
-                  } catch {
-                      $retryCount++
-                      Write-Host "Download failed (attempt $retryCount/$maxRetries): $($_.Exception.Message)"
-                      if ($retryCount -ge $maxRetries) {
-                          throw "Failed to download CUDA installer: $($_.Exception.Message)"
-                      }
-                      Start-Sleep -Seconds 30
-                  }
-              } while ($retryCount -lt $maxRetries)
-              
-              # Verify downloaded file
-              if (-not (Test-Path $installerPath)) {
-                  throw "CUDA installer download failed - file not found"
-              }
-              
-              $fileSize = (Get-Item $installerPath).Length / 1MB
-              Write-Host "Download complete, file size: $([math]::Round($fileSize, 2)) MB"
-              
-              # Silent install CUDA
-              Write-Host "Installing CUDA $cudaVersion..."
-              
-              # Try with basic silent install first
-              $process = Start-Process -FilePath $installerPath -ArgumentList "-s" -Wait -PassThru -NoNewWindow
-              
-              if ($process.ExitCode -ne 0) {
-                  Write-Warning "Standard CUDA installation failed (exit code: $($process.ExitCode)), trying toolkit only..."
-                  
-                  # Try toolkit only installation
-                  $process = Start-Process -FilePath $installerPath -ArgumentList @("-s", "--toolkit") -Wait -PassThru -NoNewWindow
-                  
-                  if ($process.ExitCode -ne 0) {
-                      throw "Direct installation method failed with exit code: $($process.ExitCode)"
-                  }
-              }
-              
-              Write-Host "CUDA direct installation completed"
-              
-          } catch {
-              Write-Error "All CUDA installation methods failed: $($_.Exception.Message)"
-              exit 1
-          }
-          
-          # Find CUDA installation path
-          $possiblePaths = @(
-              "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v$cudaVersion",
-              "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9",
-              "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8",
-              "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6",
-              "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4",
-              "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1"
-          )
-          
-          $cudaPath = $null
-          foreach ($path in $possiblePaths) {
-              if (Test-Path $path) {
-                  $cudaPath = $path
-                  Write-Host "Found CUDA installation path: $cudaPath"
-                  break
-              }
-          }
-          
-          if (-not $cudaPath) {
-              # Try auto-discovery
-              $cudaRoot = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
-              if (Test-Path $cudaRoot) {
-                  $versions = Get-ChildItem $cudaRoot | Where-Object { $_.PSIsContainer } | Sort-Object Name -Descending
-                  if ($versions) {
-                      $cudaPath = $versions[0].FullName
-                      Write-Host "Auto-discovered CUDA path: $cudaPath"
-                  }
-              }
-          }
-          
-          if (-not $cudaPath) {
-              Write-Error "Unable to find CUDA installation path"
-              exit 1
-          }
-          
-          # Set environment variables correctly
-          Write-Output "CUDA_PATH=$cudaPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Output "CUDA_HOME=$cudaPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Output "$cudaPath\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          Write-Output "$cudaPath\libnvvp" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          
-          Write-Host "CUDA installation and configuration complete!"
+      # OPTIMIZED: Use Jimver/cuda-toolkit action for much faster installation
+      - name: Install CUDA using cuda-toolkit action
+        uses: Jimver/cuda-toolkit@v0.2.23
+        id: cuda-toolkit
+        with:
+          cuda: ${{ needs.validate-compatibility.outputs.cuda_full_version }}
+          method: 'network'  # Use network method for faster installation
+          sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
+          non-cuda-sub-packages: '["libcublas", "libcusparse", "libcufft"]'
+          use-github-cache: true  # Enable caching for even faster subsequent runs
+          use-local-cache: true
+          log-file-suffix: 'cuda-${{ needs.validate-compatibility.outputs.cuda_version }}-py${{ github.event.inputs.python_version }}.txt'
 
       - name: Verify CUDA installation
         shell: powershell
         run: |
-          Write-Host "Verifying CUDA installation..."
+          Write-Host "🔍 Verifying CUDA installation..."
           
-          # Display environment variables
-          Write-Host "Environment variables:"
-          Write-Host "  CUDA_PATH: $env:CUDA_PATH"
-          Write-Host "  CUDA_HOME: $env:CUDA_HOME"
+          # Check environment variables
+          Write-Host "`nEnvironment variables:"
+          Write-Host "  CUDA_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}"
+          Write-Host "  CUDA_PATH (env): $env:CUDA_PATH"
           
-          # Check CUDA path
-          if (-not (Test-Path $env:CUDA_PATH)) {
-              Write-Error "CUDA path does not exist: $env:CUDA_PATH"
+          # Verify nvcc
+          Write-Host "`nChecking nvcc:"
+          nvcc --version
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "nvcc verification failed"
               exit 1
           }
           
-          # Check nvcc command
-          try {
-              $nvccOutput = & nvcc --version 2>&1
-              Write-Host "nvcc version info:"
-              Write-Host $nvccOutput
-          } catch {
-              Write-Error "nvcc command failed: $($_.Exception.Message)"
+          # Check CUDA libraries
+          $cudaPath = "${{ steps.cuda-toolkit.outputs.CUDA_PATH }}"
+          Write-Host "`nChecking CUDA libraries:"
+          
+          $requiredLibs = @("cublas64_12.dll", "cusparse64_12.dll", "cufft64_11.dll")
+          $libPath = Join-Path $cudaPath "bin"
+          
+          foreach ($lib in $requiredLibs) {
+              $fullPath = Join-Path $libPath $lib
+              # Try with version suffix first, then without
+              if (-not (Test-Path $fullPath)) {
+                  $libNoVersion = $lib -replace '64_\d+', '64'
+                  $fullPath = Join-Path $libPath $libNoVersion
+              }
               
-              # Try direct path execution
-              $nvccPath = Join-Path $env:CUDA_PATH "bin\nvcc.exe"
-              if (Test-Path $nvccPath) {
-                  Write-Host "Trying direct path nvcc execution..."
-                  try {
-                      $nvccOutput = & $nvccPath --version 2>&1
-                      Write-Host "nvcc version info (direct path):"
-                      Write-Host $nvccOutput
-                  } catch {
-                      Write-Error "Direct path nvcc also failed: $($_.Exception.Message)"
-                      exit 1
-                  }
+              if (Test-Path $fullPath) {
+                  Write-Host "  ✅ Found: $lib"
               } else {
-                  Write-Error "Cannot find nvcc.exe: $nvccPath"
-                  exit 1
+                  Write-Warning "  ⚠️  Missing: $lib (non-critical)"
               }
           }
           
-          Write-Host "CUDA installation verification successful"
+          Write-Host "`n✅ CUDA installation verified successfully!"
 
       - name: Setup Visual Studio environment
         uses: microsoft/setup-msbuild@v2
@@ -289,7 +211,7 @@ jobs:
           echo Setting up Visual Studio development environment...
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
           if %ERRORLEVEL% neq 0 (
-              echo Trying BuildTools version...
+              echo Enterprise edition not found, trying BuildTools...
               call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
           )
           
@@ -300,69 +222,45 @@ jobs:
               exit /b 1
           )
           
-          echo Visual Studio environment setup successful
+          echo ✅ Visual Studio environment setup successful
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install ninja setuptools wheel build
+          pip install ninja setuptools wheel build packaging
 
       - name: Install PyTorch with correct CUDA version
         shell: powershell
         run: |
           $pythonVersion = "${{ github.event.inputs.python_version || '3.10' }}"
           $torchVersion = "${{ github.event.inputs.torch_version || '2.7' }}"
-          $cudaVersion = "${{ needs.validate-compatibility.outputs.cuda_version }}"
+          $torchvisionVersion = "${{ needs.validate-compatibility.outputs.torchvision_version }}"
+          $torchaudioVersion = "${{ needs.validate-compatibility.outputs.torchaudio_version }}"
           $torchCudaVersion = "${{ needs.validate-compatibility.outputs.torch_short_cuda }}"
           
-          Write-Host "Installing PyTorch $torchVersion (CUDA $cudaVersion)..."
+          Write-Host "📦 Installing PyTorch $torchVersion with CUDA support..."
+          Write-Host "  - PyTorch: $torchVersion"
+          Write-Host "  - Torchvision: $torchvisionVersion"
+          Write-Host "  - Torchaudio: $torchaudioVersion"
+          Write-Host "  - CUDA index: $torchCudaVersion"
           
-          # Set corresponding torchvision and torchaudio versions
-          $torchvisionVersion = ""
-          $torchaudioVersion = ""
-          
-          switch ($torchVersion) {
-              "2.5" {
-                  $torchvisionVersion = "0.20"
-                  $torchaudioVersion = "2.5"
-              }
-              "2.6" {
-                  $torchvisionVersion = "0.21"
-                  $torchaudioVersion = "2.6"
-              }
-              "2.7" {
-                  $torchvisionVersion = "0.22"
-                  $torchaudioVersion = "2.7"
-              }
-          }
-          
-          # Build install command
+          # Install PyTorch with specific versions
           $indexUrl = "https://download.pytorch.org/whl/$torchCudaVersion"
-          $installCmd = "pip install --no-cache-dir torch==$torchVersion torchvision==$torchvisionVersion torchaudio==$torchaudioVersion --index-url $indexUrl"
+          pip install --no-cache-dir "torch==$torchVersion" "torchvision==$torchvisionVersion" "torchaudio==$torchaudioVersion" --index-url $indexUrl
           
-          Write-Host "Executing: $installCmd"
-          
-          # Execute installation
-          $process = Start-Process -FilePath "pip" -ArgumentList @(
-              "install", "--no-cache-dir",
-              "torch==$torchVersion",
-              "torchvision==$torchvisionVersion",
-              "torchaudio==$torchaudioVersion",
-              "--index-url", $indexUrl
-          ) -Wait -PassThru -NoNewWindow
-          
-          if ($process.ExitCode -ne 0) {
+          if ($LASTEXITCODE -ne 0) {
               Write-Error "PyTorch installation failed"
               exit 1
           }
           
-          Write-Host "PyTorch installation complete"
+          Write-Host "✅ PyTorch installation complete"
 
       - name: Verify PyTorch CUDA support
         run: |
           python -c "import torch; print(f'PyTorch version: {torch.__version__}')"
           python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
           python -c "import torch; print(f'CUDA version: {torch.version.cuda}') if torch.cuda.is_available() else print('CUDA not available')"
+          python -c "import torch; print(f'cuDNN version: {torch.backends.cudnn.version()}') if torch.cuda.is_available() else print('cuDNN not available')"
 
       - name: Set build environment variables
         shell: cmd
@@ -385,65 +283,77 @@ jobs:
         run: |
           if exist build rd /s /q build
           if exist dist rd /s /q dist
+          if exist *.egg-info rd /s /q *.egg-info
           echo Build directories cleaned
 
       - name: Build wheel
         shell: cmd
         run: |
-          echo Starting wheel build...
+          echo 🏗️ Starting wheel build...
           
-          REM Re-setup Visual Studio environment
+          REM Re-setup Visual Studio environment for this shell
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 || (
               call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
           )
           
           REM Verify environment
-          echo Verifying build environment...
-          echo Python: %PYTHON%
-          echo CUDA_PATH: %CUDA_PATH%
-          echo PATH: %PATH%
-          
+          echo Environment check:
           where cl
           where nvcc
+          echo CUDA_PATH: %CUDA_PATH%
           
           REM Build
           python -m build --wheel --no-isolation
           
           if %ERRORLEVEL% neq 0 (
-              echo Build failed
+              echo ❌ Build failed with error code %ERRORLEVEL%
               exit /b 1
           )
           
-          echo Build complete
+          echo ✅ Build completed successfully
 
       - name: List built wheels
         shell: powershell
         run: |
           if (Test-Path "dist") {
-              Write-Host "Built wheel files:"
+              Write-Host "📦 Built wheel files:"
               Get-ChildItem dist/*.whl | ForEach-Object {
-                  Write-Host "  - $($_.Name) ($([math]::Round($_.Length/1MB, 2)) MB)"
+                  $size = [math]::Round($_.Length/1MB, 2)
+                  Write-Host "  - $($_.Name) ($size MB)"
               }
+              
+              # Calculate total size
+              $totalSize = (Get-ChildItem dist/*.whl | Measure-Object Length -Sum).Sum / 1MB
+              Write-Host "`nTotal size: $([math]::Round($totalSize, 2)) MB"
           } else {
-              Write-Host "ERROR: No wheel files found"
+              Write-Error "No wheel files found in dist directory"
               exit 1
           }
 
       - name: Test wheel installation
         shell: powershell
         run: |
-          Write-Host "Testing wheel installation..."
+          Write-Host "🧪 Testing wheel installation..."
           
-          # Create new virtual environment for testing
+          # Create test virtual environment
           python -m venv test_env
           & "test_env\Scripts\Activate.ps1"
           
-          # Install built wheel
+          # Upgrade pip in test environment
+          python -m pip install --upgrade pip
+          
+          # Install the built wheel
           $wheelFile = Get-ChildItem dist/*.whl | Select-Object -First 1
+          Write-Host "Installing wheel: $($wheelFile.Name)"
           pip install $wheelFile.FullName
           
-          # Simple test
-          python -c "import nunchaku; print('nunchaku import successful')"
+          # Test import
+          python -c "import nunchaku; print('✅ nunchaku import successful')"
+          
+          # Deactivate virtual environment
+          deactivate
+          
+          Write-Host "✅ Wheel installation test passed"
 
       - name: Upload wheels as artifacts
         uses: actions/upload-artifact@v4
@@ -452,18 +362,65 @@ jobs:
           path: dist/*.whl
           retention-days: 30
 
+      - name: Upload CUDA installation logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cuda-installation-logs
+          path: '*.log.txt'
+          retention-days: 7
+
       - name: Build summary
         shell: powershell
         run: |
-          Write-Host "Build successfully completed!"
-          Write-Host "Build info:"
-          Write-Host "  - Python version: ${{ github.event.inputs.python_version }}"
-          Write-Host "  - PyTorch version: ${{ github.event.inputs.torch_version }}"
-          Write-Host "  - CUDA version: ${{ needs.validate-compatibility.outputs.cuda_version }}"
+          Write-Host "`n📊 Build Summary"
+          Write-Host "================"
+          Write-Host "✅ Build completed successfully!"
+          Write-Host ""
+          Write-Host "Configuration:"
+          Write-Host "  - Python: ${{ github.event.inputs.python_version }}"
+          Write-Host "  - PyTorch: ${{ github.event.inputs.torch_version }}"
+          Write-Host "  - CUDA: ${{ needs.validate-compatibility.outputs.cuda_version }} (full: ${{ needs.validate-compatibility.outputs.cuda_full_version }})"
           Write-Host "  - Build time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+          Write-Host "  - Runner: $env:RUNNER_NAME"
           
           if (Test-Path "dist") {
-              $wheels = Get-ChildItem dist/*.whl
-              Write-Host "  - Build files: $($wheels.Count)"
-              Write-Host "  - Total size: $([math]::Round(($wheels | Measure-Object Length -Sum).Sum/1MB, 2)) MB"
+              Write-Host "`nBuilt artifacts:"
+              Get-ChildItem dist/*.whl | ForEach-Object {
+                  Write-Host "  - $($_.Name)"
+              }
           }
+
+  # Optional: Create release if tagged
+  create-release:
+    needs: build-windows-wheel
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: windows-wheels-*
+          merge-multiple: true
+          path: dist/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.whl
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          body: |
+            ## 🚀 Release ${{ github.ref_name }}
+            
+            ### 📦 Build Configuration
+            - Python: ${{ github.event.inputs.python_version }}
+            - PyTorch: ${{ github.event.inputs.torch_version }}
+            - CUDA: ${{ needs.validate-compatibility.outputs.cuda_version }}
+            
+            ### 📥 Installation
+            ```bash
+            pip install <wheel_file_name>.whl
+            ```
