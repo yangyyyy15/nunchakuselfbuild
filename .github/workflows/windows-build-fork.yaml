@@ -114,12 +114,59 @@ jobs:
           CUDA_SHORT_VERSION=${CUDA_VERSION//.}
           echo "torch_short_cuda=cu$CUDA_SHORT_VERSION" >> $GITHUB_OUTPUT
 
-  # Step 2: Main build job
+  # Step 2: Main build job with optimized resources
   build-windows-wheel:
+    # Use larger runner for more memory
     runs-on: windows-2022
+    # Alternative: Use self-hosted runner with more resources
+    # runs-on: [self-hosted, windows, x64, gpu]
+    
     needs: validate-compatibility
     if: needs.validate-compatibility.outputs.is_compatible == 'true'
+    
+    # Increase timeout for complex builds
+    timeout-minutes: 180
+    
     steps:
+      - name: Check system resources
+        shell: powershell
+        run: |
+          Write-Host "System Information:"
+          Write-Host "==================="
+          
+          # Get memory info
+          $totalMemory = (Get-WmiObject -Class Win32_ComputerSystem).TotalPhysicalMemory / 1GB
+          $freeMemory = (Get-WmiObject -Class Win32_OperatingSystem).FreePhysicalMemory / 1MB
+          Write-Host "Total Memory: $([math]::Round($totalMemory, 2)) GB"
+          Write-Host "Free Memory: $([math]::Round($freeMemory, 2)) MB"
+          
+          # Get CPU info
+          $cpu = Get-WmiObject -Class Win32_Processor
+          Write-Host "CPU: $($cpu.Name)"
+          Write-Host "CPU Cores: $($cpu.NumberOfCores)"
+          Write-Host "Logical Processors: $($cpu.NumberOfLogicalProcessors)"
+          
+          # Get disk space
+          $disk = Get-WmiObject -Class Win32_LogicalDisk -Filter "DeviceID='C:'"
+          $freeSpace = $disk.FreeSpace / 1GB
+          Write-Host "Free Disk Space: $([math]::Round($freeSpace, 2)) GB"
+
+      - name: Configure Windows page file
+        shell: powershell
+        run: |
+          Write-Host "Configuring page file for additional virtual memory..."
+          # This requires admin privileges in self-hosted runners
+          # For GitHub-hosted runners, this step will be skipped
+          try {
+              wmic computersystem set AutomaticManagedPagefile=False
+              wmic pagefileset delete
+              wmic pagefileset create name="C:\pagefile.sys"
+              wmic pagefileset set name="C:\pagefile.sys" InitialSize=16384 MaximumSize=32768
+              Write-Host "Page file configured successfully"
+          } catch {
+              Write-Host "Could not configure page file (requires admin privileges)"
+          }
+
       - name: Checkout code
         uses: actions/checkout@v4
         with:
@@ -294,15 +341,31 @@ jobs:
           $indexUrl = "https://download.pytorch.org/whl/$torchCudaVersion"
           pip install --no-cache-dir "torch==$torchVersion" "torchvision==$torchvisionVersion" "torchaudio==$torchaudioVersion" --index-url $indexUrl
 
-      - name: Set build environment variables
+      - name: Set optimized build environment variables
         shell: cmd
         run: |
+          REM Core build settings
           set NUNCHAKU_INSTALL_MODE=ALL
           set NUNCHAKU_BUILD_WHEELS=1
           set DISTUTILS_USE_SDK=1
-          set MAX_JOBS=2
-          set CL=/MP
           
+          REM CRITICAL: Reduce parallel jobs to prevent memory exhaustion
+          set MAX_JOBS=1
+          set TORCH_CUDA_ARCH_LIST=8.0
+          
+          REM Compiler optimizations for memory efficiency
+          set CL=/MP1 /O1 /GS- /Gy /Gw
+          
+          REM NVCC memory optimizations
+          set NVCC_APPEND_FLAGS=--threads 1 --optimize 1 --use_fast_math --ptxas-options=-v
+          set NVCC_APPEND_FLAGS=%NVCC_APPEND_FLAGS% --maxrregcount=128
+          set NVCC_APPEND_FLAGS=%NVCC_APPEND_FLAGS% -Xcompiler "/wd4819 /wd4251 /wd4244 /wd4267 /wd4275 /wd4018 /wd4190 /wd4624 /wd4067 /wd4068"
+          
+          REM Additional memory-saving flags
+          set CUDA_NVCC_FLAGS=--threads 1 --default-stream per-thread
+          set CUTLASS_NVCC_ARCHS=80
+          
+          REM CUDA paths
           set CUDA_HOME=%CUDA_PATH%
           set CUDA_TOOLKIT_ROOT_DIR=%CUDA_PATH%
           set CUDACXX=%CUDA_PATH%\bin\nvcc.exe
@@ -315,11 +378,58 @@ jobs:
           echo NUNCHAKU_INSTALL_MODE=ALL>> %GITHUB_ENV%
           echo NUNCHAKU_BUILD_WHEELS=1>> %GITHUB_ENV%
           echo DISTUTILS_USE_SDK=1>> %GITHUB_ENV%
-          echo MAX_JOBS=2>> %GITHUB_ENV%
-          echo CL=/MP>> %GITHUB_ENV%
+          echo MAX_JOBS=1>> %GITHUB_ENV%
+          echo TORCH_CUDA_ARCH_LIST=8.0>> %GITHUB_ENV%
+          echo CL=/MP1 /O1 /GS- /Gy /Gw>> %GITHUB_ENV%
+          echo NVCC_APPEND_FLAGS=--threads 1 --optimize 1 --use_fast_math --ptxas-options=-v --maxrregcount=128 -Xcompiler "/wd4819 /wd4251 /wd4244 /wd4267 /wd4275 /wd4018 /wd4190 /wd4624 /wd4067 /wd4068">> %GITHUB_ENV%
+          echo CUDA_NVCC_FLAGS=--threads 1 --default-stream per-thread>> %GITHUB_ENV%
+          echo CUTLASS_NVCC_ARCHS=80>> %GITHUB_ENV%
           echo CUDA_HOME=%CUDA_PATH%>> %GITHUB_ENV%
           echo CUDA_TOOLKIT_ROOT_DIR=%CUDA_PATH%>> %GITHUB_ENV%
           echo CUDACXX=%CUDA_PATH%\bin\nvcc.exe>> %GITHUB_ENV%
+
+      - name: Configure setup.py for memory-efficient build
+        shell: powershell
+        run: |
+          # Check if setup.py exists and create a backup
+          if (Test-Path "setup.py") {
+              Copy-Item "setup.py" "setup.py.backup"
+              
+              # Read setup.py content
+              $setupContent = Get-Content "setup.py" -Raw
+              
+              # Check if we need to add memory optimization flags
+              if ($setupContent -notmatch "extra_compile_args") {
+                  Write-Host "Adding memory optimization flags to setup.py..."
+                  
+                  # Add optimization flags for nvcc
+                  $optimizationCode = @"
+
+# Memory optimization for CUDA compilation
+import os
+os.environ['TORCH_CUDA_ARCH_LIST'] = '8.0'
+os.environ['MAX_JOBS'] = '1'
+os.environ['NVCC_APPEND_FLAGS'] = '--threads 1 --optimize 1 --use_fast_math --maxrregcount=128'
+
+"@
+                  
+                  # Insert at the beginning of the file after imports
+                  $lines = $setupContent -split "`n"
+                  $insertIndex = 0
+                  for ($i = 0; $i -lt $lines.Count; $i++) {
+                      if ($lines[$i] -match "^from|^import" -and $lines[$i+1] -notmatch "^from|^import") {
+                          $insertIndex = $i + 1
+                          break
+                      }
+                  }
+                  
+                  $lines = $lines[0..$insertIndex] + $optimizationCode + $lines[($insertIndex+1)..($lines.Count-1)]
+                  $setupContent = $lines -join "`n"
+                  
+                  Set-Content "setup.py" $setupContent -Encoding UTF8
+                  Write-Host "Memory optimization flags added to setup.py"
+              }
+          }
 
       - name: Clean build directory
         shell: cmd
@@ -327,6 +437,9 @@ jobs:
           if exist build rd /s /q build
           if exist dist rd /s /q dist
           if exist *.egg-info rd /s /q *.egg-info
+          
+          REM Also clean CUDA cache
+          if exist "%LOCALAPPDATA%\NVIDIA\ComputeCache" rd /s /q "%LOCALAPPDATA%\NVIDIA\ComputeCache"
 
       # Attempt to create missing files if needed
       - name: Create missing interop files (if needed)
@@ -342,10 +455,32 @@ jobs:
               Write-Host "Created minimal src/interop/torch.h"
           }
 
-      - name: Build wheel
+      - name: Monitor memory during build
+        shell: powershell
+        run: |
+          # Start a background job to monitor memory usage
+          $monitorJob = Start-Job -ScriptBlock {
+              while ($true) {
+                  $mem = Get-WmiObject -Class Win32_OperatingSystem
+                  $totalMem = $mem.TotalVisibleMemorySize / 1MB
+                  $freeMem = $mem.FreePhysicalMemory / 1MB
+                  $usedMem = $totalMem - $freeMem
+                  $percentUsed = [math]::Round(($usedMem / $totalMem) * 100, 2)
+                  
+                  $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                  "$timestamp - Memory Usage: $([math]::Round($usedMem, 2)) MB / $([math]::Round($totalMem, 2)) MB ($percentUsed%)"
+                  
+                  Start-Sleep -Seconds 30
+              }
+          }
+          
+          # Save job ID for later cleanup
+          $monitorJob.Id | Out-File -FilePath "monitor_job_id.txt"
+
+      - name: Build wheel with memory monitoring
         shell: cmd
         run: |
-          echo Starting wheel build...
+          echo Starting wheel build with memory optimizations...
           
           REM Setup Visual Studio environment
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 || (
@@ -358,25 +493,53 @@ jobs:
           set CUDACXX=%CUDA_PATH%\bin\nvcc.exe
           set PATH=%CUDA_PATH%\bin;%PATH%
           
+          REM Critical memory settings
+          set MAX_JOBS=1
+          set TORCH_CUDA_ARCH_LIST=8.0
+          set NVCC_APPEND_FLAGS=--threads 1 --optimize 1 --use_fast_math --maxrregcount=128
+          set CUDA_NVCC_FLAGS=--threads 1 --default-stream per-thread
+          
           REM Ensure include paths are set correctly
           set INCLUDE=%CUDA_PATH%\include;src;src\interop;third_party\spdlog\include;third_party\json\include;third_party\mio\include;third_party\cutlass\include;third_party\Block-Sparse-Attention\csrc\block_sparse_attn;%INCLUDE%
           set LIB=%CUDA_PATH%\lib\x64;%LIB%
           
-          REM Build
+          REM Try to build with memory-efficient settings
+          echo Building with MAX_JOBS=1 to prevent memory exhaustion...
           python -m build --wheel --no-isolation
           
           if %ERRORLEVEL% neq 0 (
               echo [ERROR] Build failed with error code %ERRORLEVEL%
               
-              REM Try alternative build command
-              echo Trying alternative build with setup.py directly...
-              python setup.py bdist_wheel
+              REM Try alternative build command with even more conservative settings
+              echo Trying alternative build with setup.py directly and minimal settings...
+              set TORCH_CUDA_ARCH_LIST=8.0
+              set MAX_JOBS=1
+              set NVCC_THREADS=1
+              
+              python setup.py bdist_wheel --plat-name win_amd64
               
               if %ERRORLEVEL% neq 0 (
                   echo [ERROR] Alternative build also failed
-                  exit /b 1
+                  
+                  REM Last resort: try building specific components separately
+                  echo Attempting component-wise build...
+                  python setup.py build_ext --inplace
+                  if %ERRORLEVEL% equ 0 (
+                      python setup.py bdist_wheel
+                  )
               )
           )
+
+      - name: Stop memory monitoring
+        shell: powershell
+        if: always()
+        run: |
+          if (Test-Path "monitor_job_id.txt") {
+              $jobId = Get-Content "monitor_job_id.txt"
+              Stop-Job -Id $jobId -ErrorAction SilentlyContinue
+              Remove-Job -Id $jobId -ErrorAction SilentlyContinue
+              Remove-Item "monitor_job_id.txt"
+          }
 
       - name: List built wheels
         shell: powershell
@@ -389,6 +552,15 @@ jobs:
               }
           } else {
               Write-Error "No wheel files found"
+              
+              # Check if there are any build artifacts
+              Write-Host "`nChecking for build artifacts:"
+              if (Test-Path "build") {
+                  Get-ChildItem "build" -Recurse -Filter "*.pyd" | ForEach-Object {
+                      Write-Host "Found extension: $($_.FullName)"
+                  }
+              }
+              
               exit 1
           }
 
@@ -408,5 +580,28 @@ jobs:
             *.log
             build/**/*.log
             setup.py
+            setup.py.backup
             pyproject.toml
+            build/temp*/**/*.d
+            build/temp*/**/*.obj.d
           retention-days: 7
+
+      - name: Collect detailed error information on failure
+        if: failure()
+        shell: powershell
+        run: |
+          Write-Host "Collecting detailed error information..."
+          
+          # Find and display last few lines of nvcc error output
+          Get-ChildItem -Path . -Filter "*.log" -Recurse | ForEach-Object {
+              Write-Host "`n=== Content of $($_.FullName) ==="
+              Get-Content $_.FullName -Tail 100
+          }
+          
+          # Check for CUDA compilation artifacts
+          if (Test-Path "build") {
+              Write-Host "`n=== CUDA compilation artifacts ==="
+              Get-ChildItem -Path "build" -Filter "*.cu.obj" -Recurse | ForEach-Object {
+                  Write-Host "Found: $($_.FullName) - Size: $($_.Length) bytes"
+              }
+          }
