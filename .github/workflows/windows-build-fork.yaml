@@ -114,108 +114,195 @@ jobs:
         run: |
           $cudaVersion = "${{ needs.validate-compatibility.outputs.cuda_version }}"
           
-          # 定义每个CUDA版本的正确下载URL
-          $cudaUrls = @{
-              "12.1" = "https://developer.download.nvidia.com/compute/cuda/12.1.0/local_installers/cuda_12.1.0_531.14_windows.exe"
-              "12.4" = "https://developer.download.nvidia.com/compute/cuda/12.4.1/local_installers/cuda_12.4.1_551.78_windows.exe"
-              "12.6" = "https://developer.download.nvidia.com/compute/cuda/12.6.0/local_installers/cuda_12.6.0_560.76_windows.exe"
-              "12.8" = "https://developer.download.nvidia.com/compute/cuda/12.8.0/local_installers/cuda_12.8.0_571.96_windows.exe"
-          }
+          Write-Host "🚀 开始安装CUDA $cudaVersion..."
           
-          # 获取下载URL
-          $downloadUrl = $cudaUrls[$cudaVersion]
-          if (-not $downloadUrl) {
-              Write-Error "未找到CUDA版本 $cudaVersion 的下载链接"
-              exit 1
-          }
-          
-          Write-Host "正在下载CUDA $cudaVersion..."
-          Write-Host "下载链接: $downloadUrl"
-          
-          $installerPath = "cuda_installer.exe"
-          
-          # 下载CUDA安装程序，带重试机制
-          $maxRetries = 3
-          $retryCount = 0
-          
-          do {
-              try {
-                  Invoke-WebRequest -Uri $downloadUrl -OutFile $installerPath -TimeoutSec 1800
-                  $downloadSuccess = $true
-                  break
-              } catch {
-                  $retryCount++
-                  Write-Host "下载失败 (尝试 $retryCount/$maxRetries): $($_.Exception.Message)"
-                  if ($retryCount -ge $maxRetries) {
-                      throw "下载CUDA安装程序失败: $($_.Exception.Message)"
-                  }
-                  Start-Sleep -Seconds 30
+          # 方法1: 尝试直接下载安装
+          try {
+              # 定义每个CUDA版本的正确下载URL
+              $cudaUrls = @{
+                  "12.1" = "https://developer.download.nvidia.com/compute/cuda/12.1.0/local_installers/cuda_12.1.0_531.14_windows.exe"
+                  "12.4" = "https://developer.download.nvidia.com/compute/cuda/12.4.1/local_installers/cuda_12.4.1_551.78_windows.exe"
+                  "12.6" = "https://developer.download.nvidia.com/compute/cuda/12.6.0/local_installers/cuda_12.6.0_560.76_windows.exe"
+                  "12.8" = "https://developer.download.nvidia.com/compute/cuda/12.8.0/local_installers/cuda_12.8.0_571.96_windows.exe"
               }
-          } while ($retryCount -lt $maxRetries)
-          
-          # 验证下载的文件
-          if (-not (Test-Path $installerPath)) {
-              Write-Error "CUDA安装程序下载失败"
-              exit 1
+              
+              # 获取下载URL
+              $downloadUrl = $cudaUrls[$cudaVersion]
+              if (-not $downloadUrl) {
+                  throw "未找到CUDA版本 $cudaVersion 的下载链接"
+              }
+              
+              Write-Host "📥 正在下载CUDA $cudaVersion..."
+              Write-Host "下载链接: $downloadUrl"
+              
+              $installerPath = "cuda_installer.exe"
+              
+              # 下载CUDA安装程序，带重试机制
+              $maxRetries = 2
+              $retryCount = 0
+              $downloadSuccess = $false
+              
+              do {
+                  try {
+                      Invoke-WebRequest -Uri $downloadUrl -OutFile $installerPath -TimeoutSec 1200
+                      $downloadSuccess = $true
+                      break
+                  } catch {
+                      $retryCount++
+                      Write-Host "下载失败 (尝试 $retryCount/$maxRetries): $($_.Exception.Message)"
+                      if ($retryCount -ge $maxRetries) {
+                          throw "下载CUDA安装程序失败: $($_.Exception.Message)"
+                      }
+                      Start-Sleep -Seconds 30
+                  }
+              } while ($retryCount -lt $maxRetries)
+              
+              # 验证下载的文件
+              if (-not (Test-Path $installerPath)) {
+                  throw "CUDA安装程序下载失败"
+              }
+              
+              $fileSize = (Get-Item $installerPath).Length / 1MB
+              Write-Host "📦 下载完成，文件大小: $([math]::Round($fileSize, 2)) MB"
+              
+              # 静默安装CUDA (安装默认组件，更可靠)
+              Write-Host "🔧 正在安装CUDA $cudaVersion..."
+              
+              # 使用简化的安装参数，只指定静默安装
+              $process = Start-Process -FilePath $installerPath -ArgumentList "-s" -Wait -PassThru -NoNewWindow
+              
+              if ($process.ExitCode -ne 0) {
+                  Write-Warning "CUDA标准安装失败 (退出代码: $($process.ExitCode))，尝试基本安装..."
+                  
+                  # 如果标准安装失败，尝试只安装工具链
+                  $process = Start-Process -FilePath $installerPath -ArgumentList @("-s", "--silent", "--toolkit") -Wait -PassThru -NoNewWindow
+                  
+                  if ($process.ExitCode -ne 0) {
+                      throw "直接安装方法失败"
+                  }
+              }
+              
+              Write-Host "✅ CUDA直接安装完成"
+              
+          } catch {
+              Write-Warning "直接下载安装失败: $($_.Exception.Message)"
+              Write-Host "🔄 尝试使用Chocolatey安装..."
+              
+              # 方法2: 使用Chocolatey安装 (备选方案)
+              try {
+                  # 安装Chocolatey (如果没有)
+                  if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
+                      Write-Host "📦 安装Chocolatey..."
+                      Set-ExecutionPolicy Bypass -Scope Process -Force
+                      [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+                      iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+                      
+                      # 刷新环境变量
+                      $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+                  }
+                  
+                  # 使用Chocolatey安装CUDA
+                  Write-Host "🍫 使用Chocolatey安装CUDA..."
+                  & choco install cuda -y --ignore-checksums
+                  
+                  if ($LASTEXITCODE -ne 0) {
+                      throw "Chocolatey安装CUDA失败"
+                  }
+                  
+                  Write-Host "✅ CUDA Chocolatey安装完成"
+                  
+              } catch {
+                  Write-Error "所有CUDA安装方法都失败了: $($_.Exception.Message)"
+                  exit 1
+              }
           }
           
-          $fileSize = (Get-Item $installerPath).Length / 1MB
-          Write-Host "下载完成，文件大小: $([math]::Round($fileSize, 2)) MB"
-          
-          # 静默安装CUDA (只安装编译需要的组件)
-          Write-Host "正在安装CUDA $cudaVersion..."
-          $installArgs = @(
-              "-s"  # 静默安装
-              "nvcc_$cudaVersion"
-              "cudart_$cudaVersion" 
-              "curand_$cudaVersion"
-              "cublas_$cudaVersion"
-              "cusparse_$cudaVersion"
-              "cusolver_$cudaVersion"
-              "cufft_$cudaVersion"
-              "curand_dev_$cudaVersion"
-              "cublas_dev_$cudaVersion"
-              "cusparse_dev_$cudaVersion"
-              "cusolver_dev_$cudaVersion"
-              "cufft_dev_$cudaVersion"
+          # 查找CUDA安装路径
+          $possiblePaths = @(
+              "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v$cudaVersion",
+              "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9",  # Chocolat可能安装更新版本
+              "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8",
+              "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6",
+              "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4"
           )
           
-          $process = Start-Process -FilePath $installerPath -ArgumentList $installArgs -Wait -PassThru -NoNewWindow
+          $cudaPath = $null
+          foreach ($path in $possiblePaths) {
+              if (Test-Path $path) {
+                  $cudaPath = $path
+                  Write-Host "🎯 找到CUDA安装路径: $cudaPath"
+                  break
+              }
+          }
           
-          if ($process.ExitCode -ne 0) {
-              Write-Error "CUDA安装失败，退出代码: $($process.ExitCode)"
+          if (-not $cudaPath) {
+              # 尝试自动发现
+              $cudaRoot = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
+              if (Test-Path $cudaRoot) {
+                  $versions = Get-ChildItem $cudaRoot | Where-Object { $_.PSIsContainer } | Sort-Object Name -Descending
+                  if ($versions) {
+                      $cudaPath = $versions[0].FullName
+                      Write-Host "🔍 自动发现CUDA路径: $cudaPath"
+                  }
+              }
+          }
+          
+          if (-not $cudaPath) {
+              Write-Error "无法找到CUDA安装路径"
               exit 1
           }
           
-          Write-Host "CUDA安装完成"
+          # 正确设置环境变量
+          Write-Output "CUDA_PATH=$cudaPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Output "CUDA_HOME=$cudaPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Output "$cudaPath\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          Write-Output "$cudaPath\libnvvp" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           
-          # 设置环境变量
-          $cudaPath = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v$cudaVersion"
-          
-          if (-not (Test-Path $cudaPath)) {
-              Write-Error "CUDA安装路径不存在: $cudaPath"
-              exit 1
-          }
-          
-          echo "CUDA_PATH=$cudaPath" >> $env:GITHUB_ENV
-          echo "CUDA_HOME=$cudaPath" >> $env:GITHUB_ENV
-          echo "$cudaPath\bin" >> $env:GITHUB_PATH
-          echo "$cudaPath\libnvvp" >> $env:GITHUB_PATH
+          Write-Host "🎉 CUDA安装和配置完成!"
 
       - name: Verify CUDA installation
-        shell: cmd
+        shell: powershell
         run: |
-          echo "验证CUDA安装..."
-          echo "CUDA_PATH=%CUDA_PATH%"
-          echo "CUDA_HOME=%CUDA_HOME%"
+          Write-Host "🔍 验证CUDA安装..."
           
-          nvcc --version
-          if %ERRORLEVEL% neq 0 (
-              echo "❌ nvcc命令失败"
-              exit /b 1
-          )
+          # 显示环境变量
+          Write-Host "环境变量:"
+          Write-Host "  CUDA_PATH: $env:CUDA_PATH"
+          Write-Host "  CUDA_HOME: $env:CUDA_HOME"
           
-          echo "✅ CUDA安装验证成功"
+          # 检查CUDA路径
+          if (-not (Test-Path $env:CUDA_PATH)) {
+              Write-Error "❌ CUDA路径不存在: $env:CUDA_PATH"
+              exit 1
+          }
+          
+          # 检查nvcc命令
+          try {
+              $nvccOutput = & nvcc --version 2>&1
+              Write-Host "✅ nvcc版本信息:"
+              Write-Host $nvccOutput
+          } catch {
+              Write-Error "❌ nvcc命令失败: $($_.Exception.Message)"
+              
+              # 尝试直接路径执行
+              $nvccPath = Join-Path $env:CUDA_PATH "bin\nvcc.exe"
+              if (Test-Path $nvccPath) {
+                  Write-Host "🔧 尝试直接路径执行nvcc..."
+                  try {
+                      $nvccOutput = & $nvccPath --version 2>&1
+                      Write-Host "✅ nvcc版本信息 (直接路径):"
+                      Write-Host $nvccOutput
+                  } catch {
+                      Write-Error "❌ 直接路径nvcc也失败: $($_.Exception.Message)"
+                      exit 1
+                  }
+              } else {
+                  Write-Error "❌ 找不到nvcc.exe: $nvccPath"
+                  exit 1
+              }
+          }
+          
+          Write-Host "🎉 CUDA安装验证成功"
 
       - name: Setup Visual Studio environment  
         uses: microsoft/setup-msbuild@v2
