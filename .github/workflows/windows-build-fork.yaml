@@ -473,19 +473,19 @@ jobs:
               
               # Insert resource limiting code
               resource_code = '''
-# Resource limiting for GitHub Actions
-import os
-if os.environ.get('GITHUB_ACTIONS') == 'true':
-    os.environ['MAX_JOBS'] = '1'
-    os.environ['PARALLEL_LEVEL'] = '1'
-    os.environ['CMAKE_BUILD_PARALLEL_LEVEL'] = '1'
-    # Reduce ninja parallelism
-    os.environ['NINJA_STATUS'] = '[%f/%t %es] '
-    # Set compilation flags for reduced memory usage
-    if 'extra_compile_args' in locals():
-        if 'nvcc' in extra_compile_args:
-            extra_compile_args['nvcc'].extend(['--threads', '1', '--default-stream', 'per-thread'])
-'''
+          # Resource limiting for GitHub Actions
+          import os
+          if os.environ.get('GITHUB_ACTIONS') == 'true':
+              os.environ['MAX_JOBS'] = '1'
+              os.environ['PARALLEL_LEVEL'] = '1'
+              os.environ['CMAKE_BUILD_PARALLEL_LEVEL'] = '1'
+              # Reduce ninja parallelism
+              os.environ['NINJA_STATUS'] = '[%f/%t %es] '
+              # Set compilation flags for reduced memory usage
+              if 'extra_compile_args' in locals():
+                  if 'nvcc' in extra_compile_args:
+                      extra_compile_args['nvcc'].extend(['--threads', '1', '--default-stream', 'per-thread'])
+          '''
               
               content = content[:import_end] + resource_code + content[import_end:]
               
