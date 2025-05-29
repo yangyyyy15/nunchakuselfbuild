@@ -132,24 +132,44 @@ jobs:
           Write-Host "Current pagefile settings:"
           Get-WmiObject -Class Win32_PageFileSetting | Select-Object Name, InitialSize, MaximumSize
           
-          # Increase pagefile to 16GB (16384 MB)
-          $pagefile = Get-WmiObject -Query "SELECT * FROM Win32_PageFileSetting WHERE Name = 'C:\\pagefile.sys'"
-          if ($pagefile) {
-              $pagefile.Delete()
+          try {
+              # Disable automatic pagefile management
+              $computersystem = Get-WmiObject Win32_ComputerSystem -EnableAllPrivileges
+              if ($computersystem.AutomaticManagedPagefile) {
+                  $computersystem.AutomaticManagedPagefile = $false
+                  $computersystem.Put() | Out-Null
+                  Write-Host "Disabled automatic pagefile management"
+              }
+              
+              # Check existing pagefile
+              $existingPagefile = Get-WmiObject -Query "SELECT * FROM Win32_PageFileSetting WHERE Name = 'C:\\pagefile.sys'"
+              
+              if ($existingPagefile) {
+                  Write-Host "Updating existing pagefile..."
+                  # Update existing pagefile
+                  $existingPagefile.InitialSize = 16384
+                  $existingPagefile.MaximumSize = 32768
+                  $existingPagefile.Put() | Out-Null
+              } else {
+                  Write-Host "Creating new pagefile..."
+                  # Create new pagefile
+                  $newPagefile = ([WMIClass]"Win32_PageFileSetting").CreateInstance()
+                  $newPagefile.Name = "C:\pagefile.sys"
+                  $newPagefile.InitialSize = 16384
+                  $newPagefile.MaximumSize = 32768
+                  $newPagefile.Put() | Out-Null
+              }
+              
+              Write-Host "Successfully configured pagefile (16GB initial, 32GB maximum)"
+              Write-Host "Note: Changes will take effect after restart"
+              
+              # Verify settings
+              Write-Host "`nVerifying new settings:"
+              Get-WmiObject -Class Win32_PageFileSetting | Select-Object Name, InitialSize, MaximumSize
+          } catch {
+              Write-Warning "Failed to modify pagefile settings: $_"
+              Write-Host "Continuing with default pagefile settings..."
           }
-          
-          # Set new pagefile with 16GB initial and 32GB maximum
-          $computersystem = Get-WmiObject Win32_ComputerSystem
-          $computersystem.AutomaticManagedPagefile = $false
-          $computersystem.Put()
-          
-          Set-WmiInstance -Class Win32_PageFileSetting -Arguments @{
-              Name = "C:\pagefile.sys"
-              InitialSize = 16384
-              MaximumSize = 32768
-          }
-          
-          Write-Host "Updated pagefile settings (will take effect after restart)"
 
       - name: Cleanup disk space
         shell: powershell
