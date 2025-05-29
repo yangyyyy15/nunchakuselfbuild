@@ -109,7 +109,7 @@ jobs:
             exit 1
           fi
           
-          echo "✅ Version compatible: PyTorch $TORCH_VERSION + CUDA $CUDA_VERSION"
+          echo "[SUCCESS] Version compatible: PyTorch $TORCH_VERSION + CUDA $CUDA_VERSION"
           
           # Output results
           echo "is_compatible=true" >> $GITHUB_OUTPUT
@@ -161,7 +161,7 @@ jobs:
       - name: Verify CUDA installation
         shell: powershell
         run: |
-          Write-Host "🔍 Verifying CUDA installation..."
+          Write-Host "Verifying CUDA installation..."
           
           # Check environment variables
           Write-Host "`nEnvironment variables:"
@@ -192,13 +192,13 @@ jobs:
               }
               
               if (Test-Path $fullPath) {
-                  Write-Host "  ✅ Found: $lib"
+                  Write-Host "  [OK] Found: $lib"
               } else {
-                  Write-Warning "  ⚠️  Missing: $lib (non-critical)"
+                  Write-Warning "  [WARNING] Missing: $lib (non-critical)"
               }
           }
           
-          Write-Host "`n✅ CUDA installation verified successfully!"
+          Write-Host "`n[SUCCESS] CUDA installation verified successfully!"
 
       - name: Setup Visual Studio environment
         uses: microsoft/setup-msbuild@v2
@@ -222,7 +222,7 @@ jobs:
               exit /b 1
           )
           
-          echo ✅ Visual Studio environment setup successful
+          echo [SUCCESS] Visual Studio environment setup successful
 
       - name: Install Python dependencies
         run: |
@@ -238,7 +238,7 @@ jobs:
           $torchaudioVersion = "${{ needs.validate-compatibility.outputs.torchaudio_version }}"
           $torchCudaVersion = "${{ needs.validate-compatibility.outputs.torch_short_cuda }}"
           
-          Write-Host "📦 Installing PyTorch $torchVersion with CUDA support..."
+          Write-Host "Installing PyTorch $torchVersion with CUDA support..."
           Write-Host "  - PyTorch: $torchVersion"
           Write-Host "  - Torchvision: $torchvisionVersion"
           Write-Host "  - Torchaudio: $torchaudioVersion"
@@ -253,7 +253,7 @@ jobs:
               exit 1
           }
           
-          Write-Host "✅ PyTorch installation complete"
+          Write-Host "[SUCCESS] PyTorch installation complete"
 
       - name: Verify PyTorch CUDA support
         run: |
@@ -289,7 +289,7 @@ jobs:
       - name: Build wheel
         shell: cmd
         run: |
-          echo 🏗️ Starting wheel build...
+          echo Starting wheel build...
           
           REM Re-setup Visual Studio environment for this shell
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 || (
@@ -306,17 +306,17 @@ jobs:
           python -m build --wheel --no-isolation
           
           if %ERRORLEVEL% neq 0 (
-              echo ❌ Build failed with error code %ERRORLEVEL%
+              echo [ERROR] Build failed with error code %ERRORLEVEL%
               exit /b 1
           )
           
-          echo ✅ Build completed successfully
+          echo [SUCCESS] Build completed successfully
 
       - name: List built wheels
         shell: powershell
         run: |
           if (Test-Path "dist") {
-              Write-Host "📦 Built wheel files:"
+              Write-Host "Built wheel files:"
               Get-ChildItem dist/*.whl | ForEach-Object {
                   $size = [math]::Round($_.Length/1MB, 2)
                   Write-Host "  - $($_.Name) ($size MB)"
@@ -333,7 +333,7 @@ jobs:
       - name: Test wheel installation
         shell: powershell
         run: |
-          Write-Host "🧪 Testing wheel installation..."
+          Write-Host "Testing wheel installation..."
           
           # Create test virtual environment
           python -m venv test_env
@@ -348,12 +348,12 @@ jobs:
           pip install $wheelFile.FullName
           
           # Test import
-          python -c "import nunchaku; print('✅ nunchaku import successful')"
+          python -c "import nunchaku; print('[SUCCESS] nunchaku import successful')"
           
           # Deactivate virtual environment
           deactivate
           
-          Write-Host "✅ Wheel installation test passed"
+          Write-Host "[SUCCESS] Wheel installation test passed"
 
       - name: Upload wheels as artifacts
         uses: actions/upload-artifact@v4
@@ -373,9 +373,9 @@ jobs:
       - name: Build summary
         shell: powershell
         run: |
-          Write-Host "`n📊 Build Summary"
-          Write-Host "================"
-          Write-Host "✅ Build completed successfully!"
+          Write-Host "`nBuild Summary"
+          Write-Host "============="
+          Write-Host "[SUCCESS] Build completed successfully!"
           Write-Host ""
           Write-Host "Configuration:"
           Write-Host "  - Python: ${{ github.event.inputs.python_version }}"
@@ -413,14 +413,14 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
           body: |
-            ## 🚀 Release ${{ github.ref_name }}
+            ## Release ${{ github.ref_name }}
             
-            ### 📦 Build Configuration
+            ### Build Configuration
             - Python: ${{ github.event.inputs.python_version }}
             - PyTorch: ${{ github.event.inputs.torch_version }}
             - CUDA: ${{ needs.validate-compatibility.outputs.cuda_version }}
             
-            ### 📥 Installation
+            ### Installation
             ```bash
             pip install <wheel_file_name>.whl
             ```
