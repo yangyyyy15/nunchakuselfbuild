@@ -124,9 +124,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: recursive  # Changed from true to recursive
+          submodules: recursive
 
-      # CRITICAL: Initialize and verify submodules
+      # Initialize and verify submodules
       - name: Initialize and update submodules
         shell: powershell
         run: |
@@ -337,12 +337,8 @@ jobs:
               Write-Host "Creating placeholder interop/torch.h..."
               
               # Create a minimal torch.h that includes the actual PyTorch headers
-              $torchHeader = @"
-#pragma once
-#include <torch/torch.h>
-#include <torch/extension.h>
-"@
-              $torchHeader | Out-File -FilePath "src/interop/torch.h" -Encoding ASCII
+              $content = "#pragma once`n#include <torch/torch.h>`n#include <torch/extension.h>`n"
+              [System.IO.File]::WriteAllText("src/interop/torch.h", $content, [System.Text.Encoding]::ASCII)
               Write-Host "Created minimal src/interop/torch.h"
           }
 
