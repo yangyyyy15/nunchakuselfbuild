@@ -64,11 +64,11 @@ jobs:
               case "$CUDA_VERSION" in
                 "12.1") 
                   COMPATIBLE=true
-                  CUDA_FULL_VERSION="12.1.0"
+                  CUDA_FULL_VERSION="12.1.1"
                   ;;
                 "12.4") 
                   COMPATIBLE=true
-                  CUDA_FULL_VERSION="12.4.0"
+                  CUDA_FULL_VERSION="12.4.1"
                   ;;
               esac
               TORCHVISION_VERSION="0.20"
@@ -78,11 +78,11 @@ jobs:
               case "$CUDA_VERSION" in
                 "12.4") 
                   COMPATIBLE=true
-                  CUDA_FULL_VERSION="12.4.0"
+                  CUDA_FULL_VERSION="12.4.1"
                   ;;
                 "12.6") 
                   COMPATIBLE=true
-                  CUDA_FULL_VERSION="12.6.0"
+                  CUDA_FULL_VERSION="12.6.2"
                   ;;
               esac
               TORCHVISION_VERSION="0.21"
@@ -146,14 +146,13 @@ jobs:
           python-version: ${{ github.event.inputs.python_version || '3.10' }}
 
       # OPTIMIZED: Use Jimver/cuda-toolkit action for much faster installation
+      # Note: On Windows, we use 'local' method for better compatibility
       - name: Install CUDA using cuda-toolkit action
         uses: Jimver/cuda-toolkit@v0.2.23
         id: cuda-toolkit
         with:
           cuda: ${{ needs.validate-compatibility.outputs.cuda_full_version }}
-          method: 'network'  # Use network method for faster installation
-          sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
-          non-cuda-sub-packages: '["libcublas", "libcusparse", "libcufft"]'
+          method: 'local'  # Use local method on Windows for better compatibility
           use-github-cache: true  # Enable caching for even faster subsequent runs
           use-local-cache: true
           log-file-suffix: 'cuda-${{ needs.validate-compatibility.outputs.cuda_version }}-py${{ github.event.inputs.python_version }}.txt'
@@ -176,11 +175,31 @@ jobs:
               exit 1
           }
           
-          # Check CUDA libraries
+          # Check CUDA include files
           $cudaPath = "${{ steps.cuda-toolkit.outputs.CUDA_PATH }}"
+          Write-Host "`nChecking CUDA include files:"
+          
+          $requiredHeaders = @("cublas_v2.h", "cuda.h", "cuda_runtime.h", "cudnn.h", "cufft.h", "cusparse.h")
+          $includePath = Join-Path $cudaPath "include"
+          
+          foreach ($header in $requiredHeaders) {
+              $fullPath = Join-Path $includePath $header
+              if (Test-Path $fullPath) {
+                  Write-Host "  [OK] Found: $header"
+              } else {
+                  if ($header -eq "cudnn.h") {
+                      Write-Warning "  [WARNING] Missing: $header (will be installed by PyTorch)"
+                  } else {
+                      Write-Error "  [ERROR] Missing required header: $header"
+                      exit 1
+                  }
+              }
+          }
+          
+          # Check CUDA libraries
           Write-Host "`nChecking CUDA libraries:"
           
-          $requiredLibs = @("cublas64_12.dll", "cusparse64_12.dll", "cufft64_11.dll")
+          $requiredLibs = @("cublas64_12.dll", "cusparse64_12.dll", "cufft64_11.dll", "cudart64_12.dll")
           $libPath = Join-Path $cudaPath "bin"
           
           foreach ($lib in $requiredLibs) {
@@ -194,11 +213,18 @@ jobs:
               if (Test-Path $fullPath) {
                   Write-Host "  [OK] Found: $lib"
               } else {
-                  Write-Warning "  [WARNING] Missing: $lib (non-critical)"
+                  Write-Warning "  [WARNING] Missing: $lib (may have different version)"
               }
           }
           
-          Write-Host "`n[SUCCESS] CUDA installation verified successfully!"
+          # List actual files in CUDA directories for debugging
+          Write-Host "`nActual files in CUDA include directory:"
+          Get-ChildItem (Join-Path $cudaPath "include") -Name | Select-Object -First 10 | ForEach-Object { Write-Host "  $_" }
+          
+          Write-Host "`nActual DLL files in CUDA bin directory:"
+          Get-ChildItem (Join-Path $cudaPath "bin") -Filter "*.dll" -Name | Select-Object -First 10 | ForEach-Object { Write-Host "  $_" }
+          
+          Write-Host "`n[SUCCESS] CUDA installation verified!"
 
       - name: Setup Visual Studio environment
         uses: microsoft/setup-msbuild@v2
@@ -266,17 +292,36 @@ jobs:
         shell: cmd
         run: |
           echo Setting build environment variables...
+          
+          REM Project-specific environment variables
           set NUNCHAKU_INSTALL_MODE=ALL
           set NUNCHAKU_BUILD_WHEELS=1
           set DISTUTILS_USE_SDK=1
           set MAX_JOBS=2
           set CL=/MP
           
+          REM CUDA-specific environment variables
+          set CUDA_HOME=%CUDA_PATH%
+          set CUDA_TOOLKIT_ROOT_DIR=%CUDA_PATH%
+          set CUDACXX=%CUDA_PATH%\bin\nvcc.exe
+          
+          REM Add CUDA directories to paths
+          set INCLUDE=%CUDA_PATH%\include;%INCLUDE%
+          set LIB=%CUDA_PATH%\lib\x64;%LIB%
+          
+          REM Save all environment variables to GitHub env
           echo NUNCHAKU_INSTALL_MODE=ALL>> %GITHUB_ENV%
           echo NUNCHAKU_BUILD_WHEELS=1>> %GITHUB_ENV%
           echo DISTUTILS_USE_SDK=1>> %GITHUB_ENV%
           echo MAX_JOBS=2>> %GITHUB_ENV%
           echo CL=/MP>> %GITHUB_ENV%
+          echo CUDA_HOME=%CUDA_PATH%>> %GITHUB_ENV%
+          echo CUDA_TOOLKIT_ROOT_DIR=%CUDA_PATH%>> %GITHUB_ENV%
+          echo CUDACXX=%CUDA_PATH%\bin\nvcc.exe>> %GITHUB_ENV%
+          echo INCLUDE=%CUDA_PATH%\include;%INCLUDE%>> %GITHUB_ENV%
+          echo LIB=%CUDA_PATH%\lib\x64;%LIB%>> %GITHUB_ENV%
+          
+          echo Environment variables set successfully
 
       - name: Clean build directory
         shell: cmd
@@ -285,6 +330,35 @@ jobs:
           if exist dist rd /s /q dist
           if exist *.egg-info rd /s /q *.egg-info
           echo Build directories cleaned
+
+      - name: Check project structure
+        shell: powershell
+        run: |
+          Write-Host "Checking project structure..."
+          
+          # Check if src/interop directory exists
+          if (Test-Path "src/interop") {
+              Write-Host "[OK] Found src/interop directory"
+              Get-ChildItem "src/interop" -Name | ForEach-Object { Write-Host "  - $_" }
+          } else {
+              Write-Warning "[WARNING] src/interop directory not found"
+          }
+          
+          # Check if the project has all required source files
+          $requiredDirs = @("src", "nunchaku", "third_party")
+          foreach ($dir in $requiredDirs) {
+              if (Test-Path $dir) {
+                  Write-Host "[OK] Found $dir directory"
+              } else {
+                  Write-Warning "[WARNING] $dir directory not found"
+              }
+          }
+          
+          # List key files in src directory
+          if (Test-Path "src") {
+              Write-Host "`nFiles in src directory:"
+              Get-ChildItem "src" -Filter "*.h" -Name | Select-Object -First 10 | ForEach-Object { Write-Host "  - $_" }
+          }
 
       - name: Build wheel
         shell: cmd
@@ -296,11 +370,30 @@ jobs:
               call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
           )
           
+          REM Set CUDA environment variables explicitly
+          set CUDA_HOME=%CUDA_PATH%
+          set CUDA_TOOLKIT_ROOT_DIR=%CUDA_PATH%
+          set CUDACXX=%CUDA_PATH%\bin\nvcc.exe
+          set PATH=%CUDA_PATH%\bin;%PATH%
+          set INCLUDE=%CUDA_PATH%\include;%INCLUDE%
+          set LIB=%CUDA_PATH%\lib\x64;%LIB%
+          
           REM Verify environment
           echo Environment check:
           where cl
           where nvcc
           echo CUDA_PATH: %CUDA_PATH%
+          echo CUDA_HOME: %CUDA_HOME%
+          echo INCLUDE contains: %INCLUDE%
+          
+          REM Check if cublas_v2.h exists
+          if exist "%CUDA_PATH%\include\cublas_v2.h" (
+              echo [OK] Found cublas_v2.h
+          ) else (
+              echo [ERROR] cublas_v2.h not found in %CUDA_PATH%\include
+              dir "%CUDA_PATH%\include\cublas*" 2>nul
+              exit /b 1
+          )
           
           REM Build
           python -m build --wheel --no-isolation
