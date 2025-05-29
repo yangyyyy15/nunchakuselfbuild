@@ -36,7 +36,7 @@ permissions:
   contents: write
 
 jobs:
-  # 验证版本兼容性
+  # Validate version compatibility
   validate-compatibility:
     runs-on: ubuntu-latest
     outputs:
@@ -53,7 +53,7 @@ jobs:
           
           echo "Checking compatibility for PyTorch $TORCH_VERSION with CUDA $CUDA_VERSION"
           
-          # 定义兼容性矩阵
+          # Define compatibility matrix
           COMPATIBLE=false
           case "$TORCH_VERSION" in
             "2.5")
@@ -74,27 +74,27 @@ jobs:
           esac
           
           if [ "$COMPATIBLE" = false ]; then
-            echo "❌ 不兼容的版本组合: PyTorch $TORCH_VERSION + CUDA $CUDA_VERSION"
-            echo "✅ 推荐组合:"
+            echo "ERROR: Incompatible version combination: PyTorch $TORCH_VERSION + CUDA $CUDA_VERSION"
+            echo "Recommended combinations:"
             echo "  - PyTorch 2.5: CUDA 12.1, 12.4"
             echo "  - PyTorch 2.6: CUDA 12.4, 12.6"
             echo "  - PyTorch 2.7: CUDA 12.8"
             exit 1
           fi
           
-          echo "✅ 版本兼容: PyTorch $TORCH_VERSION + CUDA $CUDA_VERSION"
+          echo "Version compatible: PyTorch $TORCH_VERSION + CUDA $CUDA_VERSION"
           
-          # 输出结果
+          # Output results
           echo "is_compatible=true" >> $GITHUB_OUTPUT
           echo "cuda_version=$CUDA_VERSION" >> $GITHUB_OUTPUT
           
-          # 计算PyTorch索引URL使用的CUDA版本
+          # Calculate PyTorch index URL CUDA version
           CUDA_SHORT_VERSION=${CUDA_VERSION//.}
           echo "torch_short_cuda=cu$CUDA_SHORT_VERSION" >> $GITHUB_OUTPUT
 
-  # 主构建任务
+  # Main build job
   build-windows-wheel:
-    runs-on: windows-2022  # 使用更新的运行环境
+    runs-on: windows-2022
     needs: validate-compatibility
     if: needs.validate-compatibility.outputs.is_compatible == 'true'
     steps:
@@ -114,219 +114,193 @@ jobs:
         run: |
           $cudaVersion = "${{ needs.validate-compatibility.outputs.cuda_version }}"
           
-          Write-Host "🚀 开始安装CUDA $cudaVersion..."
+          Write-Host "Starting CUDA $cudaVersion installation..."
           
-          # 方法1: 尝试直接下载安装
+          # Method 1: Try direct download and install
           try {
-              # 定义每个CUDA版本的正确下载URL
+              # Define download URLs for each CUDA version
               $cudaUrls = @{
                   "12.1" = "https://developer.download.nvidia.com/compute/cuda/12.1.0/local_installers/cuda_12.1.0_531.14_windows.exe"
                   "12.4" = "https://developer.download.nvidia.com/compute/cuda/12.4.1/local_installers/cuda_12.4.1_551.78_windows.exe"
-                  "12.6" = "https://developer.download.nvidia.com/compute/cuda/12.6.0/local_installers/cuda_12.6.0_560.76_windows.exe"
+                  "12.6" = "https://developer.download.nvidia.com/compute/cuda/12.6.2/local_installers/cuda_12.6.2_560.94_windows.exe"
                   "12.8" = "https://developer.download.nvidia.com/compute/cuda/12.8.0/local_installers/cuda_12.8.0_571.96_windows.exe"
               }
               
-              # 获取下载URL
+              # Get download URL
               $downloadUrl = $cudaUrls[$cudaVersion]
               if (-not $downloadUrl) {
-                  throw "未找到CUDA版本 $cudaVersion 的下载链接"
+                  throw "Download URL not found for CUDA version $cudaVersion"
               }
               
-              Write-Host "📥 正在下载CUDA $cudaVersion..."
-              Write-Host "下载链接: $downloadUrl"
+              Write-Host "Downloading CUDA $cudaVersion..."
+              Write-Host "Download URL: $downloadUrl"
               
               $installerPath = "cuda_installer.exe"
               
-              # 下载CUDA安装程序，带重试机制
-              $maxRetries = 2
+              # Download CUDA installer with retry mechanism
+              $maxRetries = 3
               $retryCount = 0
               $downloadSuccess = $false
               
               do {
                   try {
-                      Invoke-WebRequest -Uri $downloadUrl -OutFile $installerPath -TimeoutSec 1200
+                      Write-Host "Download attempt $($retryCount + 1)/$maxRetries..."
+                      Invoke-WebRequest -Uri $downloadUrl -OutFile $installerPath -TimeoutSec 1800
                       $downloadSuccess = $true
                       break
                   } catch {
                       $retryCount++
-                      Write-Host "下载失败 (尝试 $retryCount/$maxRetries): $($_.Exception.Message)"
+                      Write-Host "Download failed (attempt $retryCount/$maxRetries): $($_.Exception.Message)"
                       if ($retryCount -ge $maxRetries) {
-                          throw "下载CUDA安装程序失败: $($_.Exception.Message)"
+                          throw "Failed to download CUDA installer: $($_.Exception.Message)"
                       }
                       Start-Sleep -Seconds 30
                   }
               } while ($retryCount -lt $maxRetries)
               
-              # 验证下载的文件
+              # Verify downloaded file
               if (-not (Test-Path $installerPath)) {
-                  throw "CUDA安装程序下载失败"
+                  throw "CUDA installer download failed - file not found"
               }
               
               $fileSize = (Get-Item $installerPath).Length / 1MB
-              Write-Host "📦 下载完成，文件大小: $([math]::Round($fileSize, 2)) MB"
+              Write-Host "Download complete, file size: $([math]::Round($fileSize, 2)) MB"
               
-              # 静默安装CUDA (安装默认组件，更可靠)
-              Write-Host "🔧 正在安装CUDA $cudaVersion..."
+              # Silent install CUDA
+              Write-Host "Installing CUDA $cudaVersion..."
               
-              # 使用简化的安装参数，只指定静默安装
+              # Try with basic silent install first
               $process = Start-Process -FilePath $installerPath -ArgumentList "-s" -Wait -PassThru -NoNewWindow
               
               if ($process.ExitCode -ne 0) {
-                  Write-Warning "CUDA标准安装失败 (退出代码: $($process.ExitCode))，尝试基本安装..."
+                  Write-Warning "Standard CUDA installation failed (exit code: $($process.ExitCode)), trying toolkit only..."
                   
-                  # 如果标准安装失败，尝试只安装工具链
-                  $process = Start-Process -FilePath $installerPath -ArgumentList @("-s", "--silent", "--toolkit") -Wait -PassThru -NoNewWindow
+                  # Try toolkit only installation
+                  $process = Start-Process -FilePath $installerPath -ArgumentList @("-s", "--toolkit") -Wait -PassThru -NoNewWindow
                   
                   if ($process.ExitCode -ne 0) {
-                      throw "直接安装方法失败"
+                      throw "Direct installation method failed with exit code: $($process.ExitCode)"
                   }
               }
               
-              Write-Host "✅ CUDA直接安装完成"
+              Write-Host "CUDA direct installation completed"
               
           } catch {
-              Write-Warning "直接下载安装失败: $($_.Exception.Message)"
-              Write-Host "🔄 尝试使用Chocolatey安装..."
-              
-              # 方法2: 使用Chocolatey安装 (备选方案)
-              try {
-                  # 安装Chocolatey (如果没有)
-                  if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
-                      Write-Host "📦 安装Chocolatey..."
-                      Set-ExecutionPolicy Bypass -Scope Process -Force
-                      [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-                      iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-                      
-                      # 刷新环境变量
-                      $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
-                  }
-                  
-                  # 使用Chocolatey安装CUDA
-                  Write-Host "🍫 使用Chocolatey安装CUDA..."
-                  & choco install cuda -y --ignore-checksums
-                  
-                  if ($LASTEXITCODE -ne 0) {
-                      throw "Chocolatey安装CUDA失败"
-                  }
-                  
-                  Write-Host "✅ CUDA Chocolatey安装完成"
-                  
-              } catch {
-                  Write-Error "所有CUDA安装方法都失败了: $($_.Exception.Message)"
-                  exit 1
-              }
+              Write-Error "All CUDA installation methods failed: $($_.Exception.Message)"
+              exit 1
           }
           
-          # 查找CUDA安装路径
+          # Find CUDA installation path
           $possiblePaths = @(
               "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v$cudaVersion",
-              "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9",  # Chocolat可能安装更新版本
+              "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9",
               "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8",
               "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6",
-              "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4"
+              "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4",
+              "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1"
           )
           
           $cudaPath = $null
           foreach ($path in $possiblePaths) {
               if (Test-Path $path) {
                   $cudaPath = $path
-                  Write-Host "🎯 找到CUDA安装路径: $cudaPath"
+                  Write-Host "Found CUDA installation path: $cudaPath"
                   break
               }
           }
           
           if (-not $cudaPath) {
-              # 尝试自动发现
+              # Try auto-discovery
               $cudaRoot = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
               if (Test-Path $cudaRoot) {
                   $versions = Get-ChildItem $cudaRoot | Where-Object { $_.PSIsContainer } | Sort-Object Name -Descending
                   if ($versions) {
                       $cudaPath = $versions[0].FullName
-                      Write-Host "🔍 自动发现CUDA路径: $cudaPath"
+                      Write-Host "Auto-discovered CUDA path: $cudaPath"
                   }
               }
           }
           
           if (-not $cudaPath) {
-              Write-Error "无法找到CUDA安装路径"
+              Write-Error "Unable to find CUDA installation path"
               exit 1
           }
           
-          # 正确设置环境变量
+          # Set environment variables correctly
           Write-Output "CUDA_PATH=$cudaPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Output "CUDA_HOME=$cudaPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Output "$cudaPath\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           Write-Output "$cudaPath\libnvvp" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           
-          Write-Host "🎉 CUDA安装和配置完成!"
+          Write-Host "CUDA installation and configuration complete!"
 
       - name: Verify CUDA installation
         shell: powershell
         run: |
-          Write-Host "🔍 验证CUDA安装..."
+          Write-Host "Verifying CUDA installation..."
           
-          # 显示环境变量
-          Write-Host "环境变量:"
+          # Display environment variables
+          Write-Host "Environment variables:"
           Write-Host "  CUDA_PATH: $env:CUDA_PATH"
           Write-Host "  CUDA_HOME: $env:CUDA_HOME"
           
-          # 检查CUDA路径
+          # Check CUDA path
           if (-not (Test-Path $env:CUDA_PATH)) {
-              Write-Error "❌ CUDA路径不存在: $env:CUDA_PATH"
+              Write-Error "CUDA path does not exist: $env:CUDA_PATH"
               exit 1
           }
           
-          # 检查nvcc命令
+          # Check nvcc command
           try {
               $nvccOutput = & nvcc --version 2>&1
-              Write-Host "✅ nvcc版本信息:"
+              Write-Host "nvcc version info:"
               Write-Host $nvccOutput
           } catch {
-              Write-Error "❌ nvcc命令失败: $($_.Exception.Message)"
+              Write-Error "nvcc command failed: $($_.Exception.Message)"
               
-              # 尝试直接路径执行
+              # Try direct path execution
               $nvccPath = Join-Path $env:CUDA_PATH "bin\nvcc.exe"
               if (Test-Path $nvccPath) {
-                  Write-Host "🔧 尝试直接路径执行nvcc..."
+                  Write-Host "Trying direct path nvcc execution..."
                   try {
                       $nvccOutput = & $nvccPath --version 2>&1
-                      Write-Host "✅ nvcc版本信息 (直接路径):"
+                      Write-Host "nvcc version info (direct path):"
                       Write-Host $nvccOutput
                   } catch {
-                      Write-Error "❌ 直接路径nvcc也失败: $($_.Exception.Message)"
+                      Write-Error "Direct path nvcc also failed: $($_.Exception.Message)"
                       exit 1
                   }
               } else {
-                  Write-Error "❌ 找不到nvcc.exe: $nvccPath"
+                  Write-Error "Cannot find nvcc.exe: $nvccPath"
                   exit 1
               }
           }
           
-          Write-Host "🎉 CUDA安装验证成功"
+          Write-Host "CUDA installation verification successful"
 
-      - name: Setup Visual Studio environment  
+      - name: Setup Visual Studio environment
         uses: microsoft/setup-msbuild@v2
         with:
-          vs-version: '[17.0,18.0)'  # VS 2022
+          vs-version: '[17.0,18.0)'
 
       - name: Setup Visual Studio Developer Command Prompt
         shell: cmd
         run: |
-          echo "设置Visual Studio开发环境..."
+          echo Setting up Visual Studio development environment...
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
           if %ERRORLEVEL% neq 0 (
-              echo "尝试使用BuildTools版本..."
+              echo Trying BuildTools version...
               call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
           )
           
-          echo "验证编译器..."
+          echo Verifying compiler...
           cl
           if %ERRORLEVEL% neq 0 (
-              echo "❌ Visual Studio编译器设置失败"
+              echo ERROR: Visual Studio compiler setup failed
               exit /b 1
           )
           
-          echo "✅ Visual Studio环境设置成功"
+          echo Visual Studio environment setup successful
 
       - name: Install Python dependencies
         run: |
@@ -341,9 +315,9 @@ jobs:
           $cudaVersion = "${{ needs.validate-compatibility.outputs.cuda_version }}"
           $torchCudaVersion = "${{ needs.validate-compatibility.outputs.torch_short_cuda }}"
           
-          Write-Host "安装PyTorch $torchVersion (CUDA $cudaVersion)..."
+          Write-Host "Installing PyTorch $torchVersion (CUDA $cudaVersion)..."
           
-          # 设置对应的torchvision和torchaudio版本
+          # Set corresponding torchvision and torchaudio versions
           $torchvisionVersion = ""
           $torchaudioVersion = ""
           
@@ -353,7 +327,7 @@ jobs:
                   $torchaudioVersion = "2.5"
               }
               "2.6" {
-                  $torchvisionVersion = "0.21" 
+                  $torchvisionVersion = "0.21"
                   $torchaudioVersion = "2.6"
               }
               "2.7" {
@@ -362,38 +336,38 @@ jobs:
               }
           }
           
-          # 构建安装命令
+          # Build install command
           $indexUrl = "https://download.pytorch.org/whl/$torchCudaVersion"
           $installCmd = "pip install --no-cache-dir torch==$torchVersion torchvision==$torchvisionVersion torchaudio==$torchaudioVersion --index-url $indexUrl"
           
-          Write-Host "执行: $installCmd"
+          Write-Host "Executing: $installCmd"
           
-          # 执行安装
+          # Execute installation
           $process = Start-Process -FilePath "pip" -ArgumentList @(
-              "install", "--no-cache-dir", 
-              "torch==$torchVersion", 
-              "torchvision==$torchvisionVersion", 
-              "torchaudio==$torchaudioVersion", 
+              "install", "--no-cache-dir",
+              "torch==$torchVersion",
+              "torchvision==$torchvisionVersion",
+              "torchaudio==$torchaudioVersion",
               "--index-url", $indexUrl
           ) -Wait -PassThru -NoNewWindow
           
           if ($process.ExitCode -ne 0) {
-              Write-Error "PyTorch安装失败"
+              Write-Error "PyTorch installation failed"
               exit 1
           }
           
-          Write-Host "✅ PyTorch安装完成"
+          Write-Host "PyTorch installation complete"
 
       - name: Verify PyTorch CUDA support
         run: |
-          python -c "import torch; print(f'PyTorch版本: {torch.__version__}')"
-          python -c "import torch; print(f'CUDA可用: {torch.cuda.is_available()}')"
-          python -c "import torch; print(f'CUDA版本: {torch.version.cuda}') if torch.cuda.is_available() else print('CUDA不可用')"
+          python -c "import torch; print(f'PyTorch version: {torch.__version__}')"
+          python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
+          python -c "import torch; print(f'CUDA version: {torch.version.cuda}') if torch.cuda.is_available() else print('CUDA not available')"
 
       - name: Set build environment variables
         shell: cmd
         run: |
-          echo "设置构建环境变量..."
+          echo Setting build environment variables...
           set NUNCHAKU_INSTALL_MODE=ALL
           set NUNCHAKU_BUILD_WHEELS=1
           set DISTUTILS_USE_SDK=1
@@ -411,65 +385,65 @@ jobs:
         run: |
           if exist build rd /s /q build
           if exist dist rd /s /q dist
-          echo "✅ 构建目录已清理"
+          echo Build directories cleaned
 
       - name: Build wheel
         shell: cmd
         run: |
-          echo "开始构建wheel..."
+          echo Starting wheel build...
           
-          REM 重新设置Visual Studio环境
+          REM Re-setup Visual Studio environment
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 || (
               call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
           )
           
-          REM 验证环境
-          echo "验证构建环境..."
-          echo "Python: %PYTHON%"
-          echo "CUDA_PATH: %CUDA_PATH%"
-          echo "PATH: %PATH%"
+          REM Verify environment
+          echo Verifying build environment...
+          echo Python: %PYTHON%
+          echo CUDA_PATH: %CUDA_PATH%
+          echo PATH: %PATH%
           
           where cl
           where nvcc
           
-          REM 构建
+          REM Build
           python -m build --wheel --no-isolation
           
           if %ERRORLEVEL% neq 0 (
-              echo "❌ 构建失败"
+              echo Build failed
               exit /b 1
           )
           
-          echo "✅ 构建完成"
+          echo Build complete
 
       - name: List built wheels
         shell: powershell
         run: |
           if (Test-Path "dist") {
-              Write-Host "构建的wheel文件:"
+              Write-Host "Built wheel files:"
               Get-ChildItem dist/*.whl | ForEach-Object {
                   Write-Host "  - $($_.Name) ($([math]::Round($_.Length/1MB, 2)) MB)"
               }
           } else {
-              Write-Host "❌ 没有找到构建的wheel文件"
+              Write-Host "ERROR: No wheel files found"
               exit 1
           }
 
       - name: Test wheel installation
         shell: powershell
         run: |
-          Write-Host "测试wheel安装..."
+          Write-Host "Testing wheel installation..."
           
-          # 创建新的虚拟环境进行测试
+          # Create new virtual environment for testing
           python -m venv test_env
           & "test_env\Scripts\Activate.ps1"
           
-          # 安装构建的wheel
+          # Install built wheel
           $wheelFile = Get-ChildItem dist/*.whl | Select-Object -First 1
           pip install $wheelFile.FullName
           
-          # 简单测试
-          python -c "import nunchaku; print('✅ nunchaku导入成功')"
+          # Simple test
+          python -c "import nunchaku; print('nunchaku import successful')"
 
       - name: Upload wheels as artifacts
         uses: actions/upload-artifact@v4
@@ -481,15 +455,15 @@ jobs:
       - name: Build summary
         shell: powershell
         run: |
-          Write-Host "🎉 构建成功完成!"
-          Write-Host "📋 构建信息:"
-          Write-Host "  - Python版本: ${{ github.event.inputs.python_version }}"
-          Write-Host "  - PyTorch版本: ${{ github.event.inputs.torch_version }}"
-          Write-Host "  - CUDA版本: ${{ needs.validate-compatibility.outputs.cuda_version }}"
-          Write-Host "  - 构建时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+          Write-Host "Build successfully completed!"
+          Write-Host "Build info:"
+          Write-Host "  - Python version: ${{ github.event.inputs.python_version }}"
+          Write-Host "  - PyTorch version: ${{ github.event.inputs.torch_version }}"
+          Write-Host "  - CUDA version: ${{ needs.validate-compatibility.outputs.cuda_version }}"
+          Write-Host "  - Build time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
           
           if (Test-Path "dist") {
               $wheels = Get-ChildItem dist/*.whl
-              Write-Host "  - 构建文件数: $($wheels.Count)"
-              Write-Host "  - 总大小: $([math]::Round(($wheels | Measure-Object Length -Sum).Sum/1MB, 2)) MB"
+              Write-Host "  - Build files: $($wheels.Count)"
+              Write-Host "  - Total size: $([math]::Round(($wheels | Measure-Object Length -Sum).Sum/1MB, 2)) MB"
           }
