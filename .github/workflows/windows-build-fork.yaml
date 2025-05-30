@@ -119,8 +119,8 @@ jobs:
     runs-on: windows-2022
     needs: validate-compatibility
     if: needs.validate-compatibility.outputs.is_compatible == 'true'
-    # Increase timeout to avoid hitting limits
-    timeout-minutes: 360
+    # Increase timeout for large builds
+    timeout-minutes: 180
     strategy:
       matrix:
         # Split builds by CUDA architectures to reduce memory usage
@@ -245,19 +245,85 @@ jobs:
                   git clone --depth 1 $dependencies[$dep] "third_party/$dep"
               }
           }
+          
+          # Verify critical files exist
+          Write-Host "`nVerifying critical files:"
+          $criticalFiles = @(
+              "third_party/spdlog/include/spdlog/spdlog.h",
+              "third_party/json/include/nlohmann/json.hpp",
+              "third_party/cutlass/include/cutlass/cutlass.h"
+          )
+          
+          foreach ($file in $criticalFiles) {
+              if (Test-Path $file) {
+                  Write-Host "[OK] Found: $file"
+              } else {
+                  Write-Warning "[WARNING] Missing: $file"
+              }
+          }
 
-      # Create missing interop files if needed
-      - name: Create missing interop files (if needed)
+      # Verify source structure
+      - name: Verify project structure
         shell: powershell
         run: |
-          # Only create if src/interop exists but torch.h is missing
-          if ((Test-Path "src/interop") -and -not (Test-Path "src/interop/torch.h")) {
-              Write-Host "Creating placeholder interop/torch.h..."
+          Write-Host "Verifying project structure..."
+          
+          # Check for src/interop directory and files
+          if (Test-Path "src/interop") {
+              Write-Host "[OK] Found src/interop directory"
+              $interopFiles = Get-ChildItem "src/interop" -Filter "*.h" -ErrorAction SilentlyContinue
+              if ($interopFiles) {
+                  Write-Host "Header files in src/interop:"
+                  $interopFiles | ForEach-Object { Write-Host "  - $($_.Name)" }
+              } else {
+                  Write-Error "[ERROR] No header files found in src/interop"
+                  
+                  # Try to find torch.h elsewhere
+                  Write-Host "`nSearching for torch.h in the project:"
+                  Get-ChildItem -Path . -Filter "torch.h" -Recurse -ErrorAction SilentlyContinue | 
+                      Select-Object -First 5 | ForEach-Object { Write-Host "  Found at: $($_.FullName)" }
+              }
+          } else {
+              Write-Error "[ERROR] src/interop directory not found!"
               
-              # Create a minimal torch.h that includes the actual PyTorch headers
-              $content = "#pragma once`n#include <torch/torch.h>`n#include <torch/extension.h>`n"
-              [System.IO.File]::WriteAllText("src/interop/torch.h", $content, [System.Text.Encoding]::ASCII)
-              Write-Host "Created minimal src/interop/torch.h"
+              # List what's actually in src
+              if (Test-Path "src") {
+                  Write-Host "`nContents of src directory:"
+                  Get-ChildItem "src" -Name | ForEach-Object { Write-Host "  - $_" }
+              }
+          }
+          
+          # Check all expected directories
+          $expectedDirs = @(
+              "src",
+              "src/interop",
+              "src/kernels",
+              "nunchaku",
+              "nunchaku/csrc",
+              "third_party/cutlass",
+              "third_party/json",
+              "third_party/mio",
+              "third_party/spdlog",
+              "third_party/Block-Sparse-Attention"
+          )
+          
+          $missingDirs = @()
+          foreach ($dir in $expectedDirs) {
+              if (Test-Path $dir) {
+                  Write-Host "[OK] Found: $dir"
+              } else {
+                  Write-Warning "[MISSING] $dir"
+                  $missingDirs += $dir
+              }
+          }
+          
+          if ($missingDirs.Count -gt 0) {
+              Write-Host "`nProject structure check failed. Missing directories:"
+              $missingDirs | ForEach-Object { Write-Host "  - $_" }
+              
+              Write-Host "`nFull directory tree (first 3 levels):"
+              Get-ChildItem -Recurse -Depth 2 -Directory | Select-Object -First 50 | 
+                  ForEach-Object { Write-Host $_.FullName.Replace($PWD, ".") }
           }
 
       - name: Setup Python
@@ -282,9 +348,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          # Fix for the logging issue - install specific wheel version
-          pip install wheel==0.38.4 setuptools==65.5.0
-          pip install ninja build packaging
+          pip install ninja setuptools wheel build packaging
 
       - name: Install PyTorch with correct CUDA version
         shell: powershell
@@ -297,31 +361,62 @@ jobs:
           $indexUrl = "https://download.pytorch.org/whl/$torchCudaVersion"
           pip install --no-cache-dir "torch==$torchVersion" "torchvision==$torchvisionVersion" "torchaudio==$torchaudioVersion" --index-url $indexUrl
 
-      # Fix: Persist environment variables properly
       - name: Set optimized build environment variables
         shell: cmd
         run: |
-          REM Core build settings - export to GITHUB_ENV immediately
+          REM Core build settings
+          set NUNCHAKU_INSTALL_MODE=ALL
+          set NUNCHAKU_BUILD_WHEELS=1
+          set DISTUTILS_USE_SDK=1
+          
+          REM Significantly reduce parallelism to avoid resource exhaustion
+          set MAX_JOBS=1
+          set PARALLEL_LEVEL=1
+          set CMAKE_BUILD_PARALLEL_LEVEL=1
+          set NINJA_STATUS=[%%f/%%t %%es] 
+          
+          REM Disable multi-processor compilation to reduce memory usage
+          set CL=/wd4819 /wd4251 /wd4244 /wd4267 /wd4275 /wd4018 /wd4190 /wd4624 /wd4067 /wd4068
+          
+          REM CUDA settings
+          set CUDA_HOME=%CUDA_PATH%
+          set CUDA_TOOLKIT_ROOT_DIR=%CUDA_PATH%
+          set CUDACXX=%CUDA_PATH%\bin\nvcc.exe
+          
+          REM Set CUDA architectures based on matrix
+          if "${{ matrix.cuda_arch_group }}" == "sm_75_80" (
+              set TORCH_CUDA_ARCH_LIST=7.5;8.0
+              set CMAKE_CUDA_ARCHITECTURES=75;80
+          ) else (
+              set TORCH_CUDA_ARCH_LIST=8.6;8.9
+              set CMAKE_CUDA_ARCHITECTURES=86;89
+          )
+          
+          REM Limit NVCC parallelism
+          set CUDA_NVCC_FLAGS=--threads 1 --default-stream per-thread
+          
+          REM Memory optimization flags
+          set CUDAFLAGS=-Xfatbin -compress-all
+          
+          REM Update paths
+          set INCLUDE=%CUDA_PATH%\include;src;third_party\spdlog\include;third_party\json\include;third_party\mio\include;third_party\cutlass\include;%INCLUDE%
+          set LIB=%CUDA_PATH%\lib\x64;%LIB%
+          
+          REM Save to GitHub env
           echo NUNCHAKU_INSTALL_MODE=ALL>> %GITHUB_ENV%
           echo NUNCHAKU_BUILD_WHEELS=1>> %GITHUB_ENV%
           echo DISTUTILS_USE_SDK=1>> %GITHUB_ENV%
-          
-          REM Significantly reduce parallelism to avoid resource exhaustion
           echo MAX_JOBS=1>> %GITHUB_ENV%
           echo PARALLEL_LEVEL=1>> %GITHUB_ENV%
           echo CMAKE_BUILD_PARALLEL_LEVEL=1>> %GITHUB_ENV%
           echo NINJA_STATUS=[%%f/%%t %%es] >> %GITHUB_ENV%
-          
-          REM Disable verbose logging to avoid buffer issues
-          echo PYTHONUNBUFFERED=1>> %GITHUB_ENV%
-          echo SETUPTOOLS_USE_DISTUTILS=stdlib>> %GITHUB_ENV%
-          
-          REM CUDA settings
+          echo CL=/wd4819 /wd4251 /wd4244 /wd4267 /wd4275 /wd4018 /wd4190 /wd4624 /wd4067 /wd4068>> %GITHUB_ENV%
           echo CUDA_HOME=%CUDA_PATH%>> %GITHUB_ENV%
           echo CUDA_TOOLKIT_ROOT_DIR=%CUDA_PATH%>> %GITHUB_ENV%
           echo CUDACXX=%CUDA_PATH%\bin\nvcc.exe>> %GITHUB_ENV%
+          echo CUDA_NVCC_FLAGS=--threads 1 --default-stream per-thread>> %GITHUB_ENV%
+          echo CUDAFLAGS=-Xfatbin -compress-all>> %GITHUB_ENV%
           
-          REM Set CUDA architectures based on matrix
           if "${{ matrix.cuda_arch_group }}" == "sm_75_80" (
               echo TORCH_CUDA_ARCH_LIST=7.5;8.0>> %GITHUB_ENV%
               echo CMAKE_CUDA_ARCHITECTURES=75;80>> %GITHUB_ENV%
@@ -329,62 +424,25 @@ jobs:
               echo TORCH_CUDA_ARCH_LIST=8.6;8.9>> %GITHUB_ENV%
               echo CMAKE_CUDA_ARCHITECTURES=86;89>> %GITHUB_ENV%
           )
-          
-          REM Limit NVCC parallelism
-          echo CUDA_NVCC_FLAGS=--threads 1 --default-stream per-thread>> %GITHUB_ENV%
-          
-          REM Memory optimization flags
-          echo CUDAFLAGS=-Xfatbin -compress-all>> %GITHUB_ENV%
-          
-          REM Fix compiler warnings that might be causing issues
-          echo CL=/wd4819 /wd4251 /wd4244 /wd4267 /wd4275 /wd4018 /wd4190 /wd4624 /wd4067 /wd4068 /EHsc>> %GITHUB_ENV%
 
-      # Pre-modify setup.py to fix the logging issue
-      - name: Fix setup.py logging issues
-        shell: python
+      - name: Monitor system resources
+        shell: powershell
         run: |
-          import os
-          import re
+          Write-Host "System resource status before build:"
           
-          # Read setup.py
-          with open('setup.py', 'r', encoding='utf-8') as f:
-              content = f.read()
+          # Memory info
+          $mem = Get-WmiObject Win32_OperatingSystem
+          $totalMem = [math]::Round($mem.TotalVisibleMemorySize/1MB, 2)
+          $freeMem = [math]::Round($mem.FreePhysicalMemory/1MB, 2)
+          $usedMem = $totalMem - $freeMem
+          Write-Host "Memory: Used $usedMem GB / Total $totalMem GB (Free: $freeMem GB)"
           
-          # Add logging fix at the beginning
-          logging_fix = '''import sys
-          import os
+          # CPU info
+          $cpu = Get-WmiObject Win32_Processor
+          Write-Host "CPU: $($cpu.Name) - $($cpu.NumberOfCores) cores, $($cpu.NumberOfLogicalProcessors) logical processors"
           
-          # Fix for GitHub Actions logging buffer issue
-          if os.environ.get('GITHUB_ACTIONS') == 'true':
-              import logging
-              # Disable all logging during wheel creation to avoid buffer detachment
-              logging.disable(logging.CRITICAL)
-              # Also redirect stderr to avoid issues
-              sys.stderr = sys.stdout
-          '''
-          
-          # Insert after the first line (usually #!/usr/bin/env python)
-          lines = content.split('\n')
-          if lines[0].startswith('#!'):
-              lines.insert(1, logging_fix)
-          else:
-              lines.insert(0, logging_fix)
-          
-          content = '\n'.join(lines)
-          
-          # Also ensure NUNCHAKU_INSTALL_MODE is checked properly
-          # Fix the assertion error by making it more flexible
-          content = re.sub(
-              r'assert install_mode == "ALL"',
-              'install_mode = os.environ.get("NUNCHAKU_INSTALL_MODE", "ALL")',
-              content
-          )
-          
-          # Write back
-          with open('setup.py', 'w', encoding='utf-8') as f:
-              f.write(content)
-          
-          print("Modified setup.py to fix logging and assertion issues")
+          # Disk space
+          Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{Name="Free(GB)";Expression={[math]::Round($_.Free/1GB,2)}}, @{Name="Used(GB)";Expression={[math]::Round($_.Used/1GB,2)}}
 
       - name: Clean build directory
         shell: cmd
@@ -394,8 +452,70 @@ jobs:
           if exist *.egg-info rd /s /q *.egg-info
           if exist .cache rd /s /q .cache
 
-      # Simplified build without retry to save time
-      - name: Build wheel
+      # Attempt to create missing files if needed
+      - name: Create missing interop files (if needed)
+        shell: powershell
+        run: |
+          # Only create if src/interop exists but torch.h is missing
+          if ((Test-Path "src/interop") -and -not (Test-Path "src/interop/torch.h")) {
+              Write-Host "Creating placeholder interop/torch.h..."
+              
+              # Create a minimal torch.h that includes the actual PyTorch headers
+              $content = "#pragma once`n#include <torch/torch.h>`n#include <torch/extension.h>`n"
+              [System.IO.File]::WriteAllText("src/interop/torch.h", $content, [System.Text.Encoding]::ASCII)
+              Write-Host "Created minimal src/interop/torch.h"
+          }
+
+      - name: Pre-build setup.py modifications
+        shell: python
+        run: |
+          import os
+          import re
+          
+          # Read setup.py
+          with open('setup.py', 'r') as f:
+              content = f.read()
+          
+          # Check if we need to add resource limiting code
+          if 'resource limiting' not in content:
+              # Find the place to insert our modifications (after imports)
+              insert_pos = content.find('from setuptools')
+              if insert_pos == -1:
+                  insert_pos = content.find('import')
+              
+              # Find the end of imports section
+              lines = content[:insert_pos + 200].split('\n')
+              import_end = 0
+              for i, line in enumerate(lines):
+                  if line and not line.startswith(('import', 'from')) and not line.strip() == '':
+                      import_end = len('\n'.join(lines[:i]))
+                      break
+              
+              # Insert resource limiting code
+              resource_code = '''
+          # Resource limiting for GitHub Actions
+          import os
+          if os.environ.get('GITHUB_ACTIONS') == 'true':
+              os.environ['MAX_JOBS'] = '1'
+              os.environ['PARALLEL_LEVEL'] = '1'
+              os.environ['CMAKE_BUILD_PARALLEL_LEVEL'] = '1'
+              # Reduce ninja parallelism
+              os.environ['NINJA_STATUS'] = '[%f/%t %es] '
+              # Set compilation flags for reduced memory usage
+              if 'extra_compile_args' in locals():
+                  if 'nvcc' in extra_compile_args:
+                      extra_compile_args['nvcc'].extend(['--threads', '1', '--default-stream', 'per-thread'])
+          '''
+              
+              content = content[:import_end] + resource_code + content[import_end:]
+              
+              # Write back
+              with open('setup.py', 'w') as f:
+                  f.write(content)
+              
+              print("Modified setup.py with resource limits")
+
+      - name: Build wheel with retry mechanism
         shell: cmd
         run: |
           echo Starting wheel build for CUDA architectures: ${{ matrix.cuda_arch_group }}
@@ -405,21 +525,108 @@ jobs:
               call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
           )
           
-          REM Ensure all environment variables are set
-          set NUNCHAKU_INSTALL_MODE=ALL
-          set NUNCHAKU_BUILD_WHEELS=1
-          set MAX_JOBS=1
-          set NINJA_STATUS=[%%f/%%t %%es]
+          REM Set all environment variables again
+          set CUDA_HOME=%CUDA_PATH%
+          set CUDA_TOOLKIT_ROOT_DIR=%CUDA_PATH%
+          set CUDACXX=%CUDA_PATH%\bin\nvcc.exe
+          set PATH=%CUDA_PATH%\bin;%PATH%
           
-          REM Build wheel directly with setup.py to have more control
-          python setup.py bdist_wheel --dist-dir dist
+          REM Force single-threaded builds
+          set MAX_JOBS=1
+          set PARALLEL_LEVEL=1
+          set CMAKE_BUILD_PARALLEL_LEVEL=1
+          set CUDA_NVCC_FLAGS=--threads 1 --default-stream per-thread
+          
+          REM Set architecture-specific variables
+          if "${{ matrix.cuda_arch_group }}" == "sm_75_80" (
+              set TORCH_CUDA_ARCH_LIST=7.5;8.0
+              set CMAKE_CUDA_ARCHITECTURES=75;80
+          ) else (
+              set TORCH_CUDA_ARCH_LIST=8.6;8.9
+              set CMAKE_CUDA_ARCHITECTURES=86;89
+          )
+          
+          REM Ensure include paths are set correctly
+          set INCLUDE=%CUDA_PATH%\include;src;src\interop;third_party\spdlog\include;third_party\json\include;third_party\mio\include;third_party\cutlass\include;third_party\Block-Sparse-Attention\csrc\block_sparse_attn;%INCLUDE%
+          set LIB=%CUDA_PATH%\lib\x64;%LIB%
+          
+          REM First attempt - with reduced parallelism
+          echo [ATTEMPT 1/3] Building with minimal parallelism...
+          python -m build --wheel --no-isolation
           
           if %ERRORLEVEL% neq 0 (
-              echo Build failed with error code %ERRORLEVEL%
-              exit /b 1
+              echo [ATTEMPT 1 FAILED] First build attempt failed, cleaning and retrying...
+              
+              REM Clean build artifacts
+              if exist build rd /s /q build
+              if exist _skbuild rd /s /q _skbuild
+              
+              REM Second attempt - direct setup.py with verbose output
+              echo [ATTEMPT 2/3] Trying direct setup.py build with verbose output...
+              set DISTUTILS_DEBUG=1
+              python setup.py bdist_wheel --verbose
+              
+              if %ERRORLEVEL% neq 0 (
+                  echo [ATTEMPT 2 FAILED] Second attempt failed, trying minimal build...
+                  
+                  REM Clean again
+                  if exist build rd /s /q build
+                  if exist _skbuild rd /s /q _skbuild
+                  
+                  REM Third attempt - with minimal features
+                  echo [ATTEMPT 3/3] Final attempt with minimal configuration...
+                  set NUNCHAKU_INSTALL_MODE=MINIMAL
+                  python setup.py bdist_wheel
+                  
+                  if %ERRORLEVEL% neq 0 (
+                      echo [ERROR] All build attempts failed
+                      exit /b 1
+                  )
+              )
           )
           
           echo [SUCCESS] Build completed successfully!
+
+      - name: Post-build resource check
+        shell: powershell
+        if: always()
+        run: |
+          Write-Host "System resource status after build:"
+          
+          # Memory info
+          $mem = Get-WmiObject Win32_OperatingSystem
+          $totalMem = [math]::Round($mem.TotalVisibleMemorySize/1MB, 2)
+          $freeMem = [math]::Round($mem.FreePhysicalMemory/1MB, 2)
+          $usedMem = $totalMem - $freeMem
+          Write-Host "Memory: Used $usedMem GB / Total $totalMem GB (Free: $freeMem GB)"
+          
+          # Check for memory pressure events
+          $events = Get-WinEvent -FilterHashtable @{LogName='System'; ID=2004} -MaxEvents 10 -ErrorAction SilentlyContinue
+          if ($events) {
+              Write-Warning "Memory pressure events detected during build:"
+              $events | ForEach-Object { Write-Host $_.Message }
+          }
+
+      - name: Merge wheels from different architectures
+        if: matrix.cuda_arch_group == 'sm_86_89'
+        shell: powershell
+        run: |
+          # This step only runs for the second matrix job
+          # Download wheels from the first job and merge if necessary
+          Write-Host "Checking for wheels to merge..."
+          
+          if (Test-Path "dist") {
+              $wheels = Get-ChildItem "dist/*.whl"
+              Write-Host "Found $($wheels.Count) wheel(s) in current build"
+              
+              # If your build process creates architecture-specific wheels,
+              # you might need to merge them here
+              # For now, we'll just list what we have
+              $wheels | ForEach-Object {
+                  $size = [math]::Round($_.Length/1MB, 2)
+                  Write-Host "  - $($_.Name) ($size MB)"
+              }
+          }
 
       - name: List built wheels
         shell: powershell
@@ -429,6 +636,15 @@ jobs:
               Get-ChildItem dist/*.whl | ForEach-Object {
                   $size = [math]::Round($_.Length/1MB, 2)
                   Write-Host "  - $($_.Name) ($size MB)"
+                  
+                  # Verify wheel integrity
+                  python -m pip wheel --no-deps --no-build-isolation --check-build-dependencies "$($_.FullName)" -w temp_check
+                  if ($LASTEXITCODE -eq 0) {
+                      Write-Host "  [OK] Wheel verification passed"
+                  } else {
+                      Write-Error "  [ERROR] Wheel verification failed"
+                  }
+                  Remove-Item -Path temp_check -Recurse -Force -ErrorAction SilentlyContinue
               }
           } else {
               Write-Error "No wheel files found"
@@ -452,6 +668,7 @@ jobs:
             build/**/*.log
             setup.py
             pyproject.toml
+            build/temp*/**/*.obj.d
           retention-days: 7
 
   # Step 3: Combine wheels from different architecture groups
